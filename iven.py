@@ -1016,7 +1016,7 @@ class EmbryoCanvas(FigureCanvasQTAgg):
         self._migration_colours = {
             "outside": to_hex(self.COL_ALL[:3]),  # type: ignore
             "inside": to_hex(self.COL_IN[:3]),  # type: ignore
-            "migrated": to_hex(self.COL_MIG[:3]),  # type: ignore
+            "migration": to_hex(self.COL_MIG[:3]),  # type: ignore
         }
 
         # Instance-level copies of style dicts so colours can be customised
@@ -1209,7 +1209,7 @@ class EmbryoCanvas(FigureCanvasQTAgg):
             return
         col_in = to_rgba(self._migration_colours["inside"])
         col_out = to_rgba(self._migration_colours["outside"])
-        col_mig = to_rgba(self._migration_colours["migrated"])
+        col_mig = to_rgba(self._migration_colours["migration"])
         for i in range(s.num_cells):
             if len(s.icm_outlier_bool) > 0 and s.icm_outlier_bool[i] == 1:
                 self.face_col[i] = col_mig
@@ -1481,7 +1481,7 @@ class EmbryoCanvas(FigureCanvasQTAgg):
                 [
                     ("Inside", self._migration_colours["inside"]),
                     ("Outside", self._migration_colours["outside"]),
-                    ("Migrated", self._migration_colours["migrated"]),
+                    ("Migration", self._migration_colours["migration"]),
                 ],
             )
         else:
@@ -2426,7 +2426,7 @@ class IvenMainWindow(QMainWindow):
             self.btn_manual_cavity.setChecked(False)
             self.btn_manual_nbr.setChecked(False)
         self.show_message(
-            "Click ICM cells to toggle migrated (outlier) status."
+            "Click ICM cells to toggle migration (outlier) status."
             if checked
             else "Manual migration mode off."
         )
@@ -2572,7 +2572,7 @@ class IvenMainWindow(QMainWindow):
         if self.btn_manual_migration.isChecked():
             # Only allow toggling on ICM (inside) cells
             if len(s.outside_bool2) > 0 and s.outside_bool2[idx] == 1:
-                self.show_message(f"Cell {cell_id} is an outside cell — only ICM cells can be toggled as migrated.")
+                self.show_message(f"Cell {cell_id} is an outside cell — only ICM cells can be toggled as migration.")
                 return
             # Initialise outlier arrays if needed
             if len(s.icm_outlier_bool) == 0:
@@ -2593,7 +2593,7 @@ class IvenMainWindow(QMainWindow):
                 self.canvas.clear_migration_lines()
                 self.canvas.draw_migration_lines()
             is_outlier = s.icm_outlier_bool[idx] == 1
-            label = "migrated (outlier)" if is_outlier else "ICM (not migrated)"
+            label = "Migration (outlier)" if is_outlier else "ICM (not migrated)"
             self.show_message(f"Cell {cell_id} -> {label}")
             return
 
@@ -2713,9 +2713,9 @@ class IvenMainWindow(QMainWindow):
                 [
                     ("Inside", "inside"),
                     ("Outside", "outside"),
-                    ("Migrated", "migrated"),
+                    ("Migration", "migration"),
                 ],
-                self.canvas._cavity_colours,
+                self.canvas._migration_colours,
                 "__migration__",
             )
             return
