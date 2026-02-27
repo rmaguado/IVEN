@@ -123,7 +123,7 @@ class ClickableSwatch(QLabel):
     
     def border_color(self) -> str:
         luminance = self.get_luminance()
-        return "#000000" if luminance > 0.8 else self._colour
+        return "#000000" if luminance > 0.9 else self._colour
 
     def _update_style(self):
         text_colour = self.text_color()
@@ -1008,11 +1008,16 @@ class EmbryoCanvas(FigureCanvasQTAgg):
     _legend_visible: bool
     _legend_artists: list
 
-    def __init__(self, parent=None, width=6, height=6, dpi=100):
-        self.fig = Figure(figsize=(width, height), dpi=dpi)
-        self.fig.patch.set_facecolor("#f0f0f0")
+    def __init__(self, parent=None, dpi=100):
+        self.fig = Figure(dpi=dpi)
+        self._bg_colour = "#f0f0f0"
+        self.fig.patch.set_facecolor(self._bg_colour)
         super().__init__(self.fig)
         self.setParent(parent)
+        self.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Expanding
+        )
 
         self._outer_hull_lines = []
         self._outer_hull_visible = True
@@ -1106,8 +1111,9 @@ class EmbryoCanvas(FigureCanvasQTAgg):
         self.ax = self.fig.add_subplot(111, projection="3d")
         self.ax.grid(False)
         self.ax.axis("off")
-        self.ax.set_facecolor("#f0f0f0")
+        self.ax.set_facecolor(self._bg_colour)
         self.fig.subplots_adjust(left=0, right=1, bottom=0, top=1)
+        self._set_equal_3d()
 
         df, de, ds = self._apply_hidden(
             self.face_col.copy(), self.edge_col.copy(), self._size.copy()
@@ -1124,8 +1130,6 @@ class EmbryoCanvas(FigureCanvasQTAgg):
             linewidth=2,
             alpha=1,
         )
-        self._set_equal_3d()
-        self.ax.set_box_aspect([1, 1, 1])
 
         self._outer_hull_lines = []
         if self._outer_hull_visible:
@@ -1321,6 +1325,14 @@ class EmbryoCanvas(FigureCanvasQTAgg):
             ln.set_visible(visible)
         self.draw_idle()
 
+    def set_background_colour(self, colour_hex: str):
+        """Change the background colour of the figure and 3D axes."""
+        self._bg_colour = colour_hex
+        self.fig.patch.set_facecolor(colour_hex)
+        if self.ax is not None:
+            self.ax.set_facecolor(colour_hex)
+        self.draw_idle()
+
     def set_points_hidden(self, category, hidden):
         self._pts_hidden[category] = hidden
         self.update_colours()
@@ -1366,6 +1378,15 @@ class EmbryoCanvas(FigureCanvasQTAgg):
         return mask
 
     def _set_equal_3d(self):
+        # https://github.com/matplotlib/matplotlib/blob/v3.10.8/lib/mpl_toolkits/mplot3d/axes3d.py#L395-L410
+        def apply_aspect_nonsquare(position=None):
+            if position is None:
+                position = self.ax.get_position(original=True)
+            self.ax._set_position(position, 'active') # type: ignore
+
+        self.ax.apply_aspect = apply_aspect_nonsquare
+        self.ax.set_box_aspect([1, 1, 1])
+
         xyz = self.session.xyz
         mins, maxs = xyz.min(0), xyz.max(0)
         c = (mins + maxs) / 2
@@ -1956,10 +1977,7 @@ class IvenMainWindow(QMainWindow):
         toolbar.addAction(self.btn_colour_settings)
 
         # canvas
-        self.canvas = EmbryoCanvas(self, width=7, height=7)
-        self.canvas.setSizePolicy(
-            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
-        )
+        self.canvas = EmbryoCanvas(self)
 
         # right panel
         right_panel = QWidget()
@@ -2033,7 +2051,51 @@ class IvenMainWindow(QMainWindow):
         edge_row.addStretch()
         cs_layout.addLayout(edge_row)
 
+        # Background colour picker
+        bg_row = QHBoxLayout()
+        bg_row.setSpacing(6)
+        bg_lbl = QLabel("Background:")
+        bg_lbl.setStyleSheet("font-size: 11px; color: #555; background: transparent;")
+        bg_row.addWidget(bg_lbl)
+        self._bg_swatch = ClickableSwatch("#f0f0f0", 14)
+        self._bg_swatch.setToolTip("Canvas background colour")
+        self._bg_swatch.clicked.connect(self._pick_bg_colour)
+        bg_row.addWidget(self._bg_swatch)
+        bg_row.addStretch()
+        cs_layout.addLayout(bg_row)
+
         rl.addWidget(colour_section)
+
+        # Cell count stats section
+        stats_section = QWidget()
+        stats_section.setObjectName("statsSection")
+        stats_section.setStyleSheet(
+            "QWidget#statsSection {"
+            "  background: #ffffff;"
+            "  border: 1px solid #e2e4e8;"
+            "  border-radius: 8px;"
+            "}"
+        )
+        stats_layout = QVBoxLayout(stats_section)
+        stats_layout.setSpacing(4)
+        stats_layout.setContentsMargins(10, 10, 10, 10)
+
+        stats_header = QLabel("Cell Counts")
+        stats_header.setStyleSheet(
+            "font-size: 10px; font-weight: 700; color: #8b8fa3;"
+            "letter-spacing: 0.5px; text-transform: uppercase;"
+            "background: transparent; padding: 0; margin: 0;"
+        )
+        stats_layout.addWidget(stats_header)
+
+        self._lbl_total = QLabel("Total: —")
+        self._lbl_outside = QLabel("Outside: —")
+        self._lbl_inside = QLabel("Inside: —")
+        self._lbl_cavity = QLabel("Cavity-adjacent: —")
+        _count_style = "font-size: 11px; color: #3a3d4a; background: transparent;"
+        for lbl in (self._lbl_total, self._lbl_outside, self._lbl_inside, self._lbl_cavity):
+            lbl.setStyleSheet(_count_style)
+            stats_layout.addWidget(lbl)
 
         # Layers
         layer_section = QWidget()
@@ -2183,6 +2245,7 @@ class IvenMainWindow(QMainWindow):
             layer_outer.addWidget(row_widget)
 
         rl.addWidget(layer_section)
+        rl.addWidget(stats_section)
         rl.addStretch()
 
         # Assemble layout
@@ -2358,6 +2421,8 @@ class IvenMainWindow(QMainWindow):
                 self.canvas.update_edge_for_outside()
             self._apply_colour_mode()
 
+        self._update_cell_counts()
+
     def _auto_detect_outside(self):
         s = self.session
         if s.num_cells == 0:
@@ -2374,6 +2439,7 @@ class IvenMainWindow(QMainWindow):
         self.show_message(
             f"Outside: {len(s.outside_ids2)} | Inside: {len(s.inside_ids2)}"
         )
+        self._update_cell_counts()
 
     def _toggle_manual_outside_mode(self, checked):
         if checked:
@@ -2485,6 +2551,7 @@ class IvenMainWindow(QMainWindow):
             self.canvas.draw_migration_lines()
 
         self.show_message(f"Cavity-adjacent: {len(cavity_ids)} cells ")
+        self._update_cell_counts()
 
     def _toggle_manual_cavity_mode(self, checked):
         if checked:
@@ -2631,6 +2698,7 @@ class IvenMainWindow(QMainWindow):
             self.canvas.refresh_overlays()
             label = "outside" if s.outside_bool2[idx] == 1 else "inside"
             self.show_message(f"Cell {cell_id} -> {label}")
+            self._update_cell_counts()
             return
 
         if self.btn_manual_cavity.isChecked():
@@ -2648,6 +2716,7 @@ class IvenMainWindow(QMainWindow):
             self.canvas.refresh_overlays()
             label = "cavity-adj" if s.cav_adj_bool[idx] == 1 else "not cavity-adj"
             self.show_message(f"Cell {cell_id} -> {label}")
+            self._update_cell_counts()
             return
 
         if self.btn_manual_migration.isChecked():
@@ -2761,6 +2830,38 @@ class IvenMainWindow(QMainWindow):
             self.canvas._edge_outside_colour = c.name()
             self._edge_outside_swatch.set_colour(c.name())
             self.canvas.update_edge_for_outside()
+
+    def _pick_bg_colour(self):
+        """Open a colour picker for the canvas background colour."""
+        current = self.canvas._bg_colour
+        c = QColorDialog.getColor(QColor(current), self, "Canvas background colour")
+        if c.isValid():
+            self.canvas.set_background_colour(c.name())
+            self._bg_swatch.set_colour(c.name())
+
+    def _update_cell_counts(self):
+        """Refresh the cell count labels in the stats section."""
+        s = self.session
+        total = s.num_cells if s else 0
+        self._lbl_total.setText(f"Total: {total}")
+        if total == 0:
+            self._lbl_outside.setText("Outside: 0")
+            self._lbl_inside.setText("Inside: 0")
+            self._lbl_cavity.setText("Cavity-adjacent: 0")
+            return
+        if len(s.outside_bool2) > 0:
+            n_out = int(np.sum(s.outside_bool2 == 1))
+            n_in = int(np.sum(s.outside_bool2 == 0))
+            self._lbl_outside.setText(f"Outside: {n_out}")
+            self._lbl_inside.setText(f"Inside: {n_in}")
+        else:
+            self._lbl_outside.setText("Outside: 0")
+            self._lbl_inside.setText("Inside: 0")
+        if len(s.cav_adj_bool) > 0:
+            n_cav = int(np.sum(s.cav_adj_bool == 1))
+            self._lbl_cavity.setText(f"Cavity-adjacent: {n_cav}")
+        else:
+            self._lbl_cavity.setText("Cavity-adjacent: 0")
 
     def _pick_edge_inside_colour(self):
         """Open a colour picker for the inside cell edge colour."""
