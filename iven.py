@@ -1238,8 +1238,8 @@ class EmbryoCanvas(FigureCanvasQTAgg):
                         [s.xyz[i, 2], s.xyz[j, 2]],
                         "-",
                         color="#9999bb",
-                        linewidth=0.5,
-                        alpha=0.3,
+                        linewidth=0.75,
+                        alpha=0.5,
                     )
                     self._nbr_lines.append(ln)
         self.draw_idle()
