@@ -101,10 +101,37 @@ class ClickableSwatch(QLabel):
         self._update_style()
         self.setCursor(Qt.CursorShape.PointingHandCursor)
 
+    def get_luminance(self):
+        bg_hex = self._colour.lstrip("#")
+        r = int(bg_hex[0:2], 16) / 255
+        g = int(bg_hex[2:4], 16) / 255
+        b = int(bg_hex[4:6], 16) / 255
+
+        def correct(c):
+            return c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4
+
+        r = correct(r)
+        g = correct(g)
+        b = correct(b)
+
+        luminance = 0.2126 * r + 0.7152 * g + 0.0722 * b
+        return luminance
+
+    def text_color(self) -> str:
+        luminance = self.get_luminance()
+        return "#000000" if luminance > 0.179 else "#ffffff"
+    
+    def border_color(self) -> str:
+        luminance = self.get_luminance()
+        return "#000000" if luminance > 0.8 else self._colour
+
     def _update_style(self):
+        text_colour = self.text_color()
+        border_colour = self.border_color()
         self.setStyleSheet(
+            f"color: {text_colour};"
             f"background: {self._colour}; border-radius: {self._size // 2}px;"
-            f"border: 1.5px solid {self._colour};"
+            f"border: 0.5px solid {border_colour};"
         )
 
     def set_colour(self, colour: str):
@@ -1022,6 +1049,10 @@ class EmbryoCanvas(FigureCanvasQTAgg):
             "migration": to_hex(self.COL_MIG[:3]),  # type: ignore
         }
 
+        # Edge colours for scatter main points (outside = black ring, inside = white ring)
+        self._edge_outside_colour = "#000000"
+        self._edge_inside_colour = "#ffffff"
+
         # Instance-level copies of style dicts so colours can be customised
         self._WIRE_STYLE = dict(self.__class__._WIRE_STYLE)
         self._VOL_STYLE = dict(self.__class__._VOL_STYLE)
@@ -1140,8 +1171,10 @@ class EmbryoCanvas(FigureCanvasQTAgg):
         s = self.session
         if s is None or len(s.outside_bool2) == 0:
             return
-        self.edge_col = np.ones((s.num_cells, 4))
-        self.edge_col[np.where(s.outside_bool2 == 1)[0], 0:3] = 0.0
+        outside_rgba = np.array(to_rgba(self._edge_outside_colour))
+        inside_rgba = np.array(to_rgba(self._edge_inside_colour))
+        self.edge_col = np.tile(inside_rgba, (s.num_cells, 1))
+        self.edge_col[np.where(s.outside_bool2 == 1)[0]] = outside_rgba
         self.update_colours()
 
     def colour_by_channel(self, column_name):
@@ -1974,6 +2007,32 @@ class IvenMainWindow(QMainWindow):
         )
         cs_layout.addWidget(self.colour_combo)
 
+        # Edge colour pickers
+        edge_row = QHBoxLayout()
+        edge_row.setSpacing(6)
+        edge_lbl = QLabel("Edge:")
+        edge_lbl.setStyleSheet("font-size: 11px; color: #555; background: transparent;")
+        edge_row.addWidget(edge_lbl)
+
+        edge_outside_lbl = QLabel("Outside")
+        edge_outside_lbl.setStyleSheet("font-size: 10px; color: #777; background: transparent;")
+        self._edge_outside_swatch = ClickableSwatch("#000000", 14)
+        self._edge_outside_swatch.setToolTip("Edge colour for outside cells")
+        self._edge_outside_swatch.clicked.connect(self._pick_edge_outside_colour)
+        edge_row.addWidget(self._edge_outside_swatch)
+        edge_row.addWidget(edge_outside_lbl)
+        edge_row.addSpacing(8)
+
+        edge_inside_lbl = QLabel("Inside")
+        edge_inside_lbl.setStyleSheet("font-size: 10px; color: #777; background: transparent;")
+        self._edge_inside_swatch = ClickableSwatch("#ffffff", 14)
+        self._edge_inside_swatch.setToolTip("Edge colour for inside cells")
+        self._edge_inside_swatch.clicked.connect(self._pick_edge_inside_colour)
+        edge_row.addWidget(self._edge_inside_swatch)
+        edge_row.addWidget(edge_inside_lbl)
+        edge_row.addStretch()
+        cs_layout.addLayout(edge_row)
+
         rl.addWidget(colour_section)
 
         # Layers
@@ -2693,6 +2752,24 @@ class IvenMainWindow(QMainWindow):
     def _toggle_legend(self, checked):
         self.canvas.set_legend_visible(checked)
         self.show_message("Legend: on" if checked else "Legend: off")
+
+    def _pick_edge_outside_colour(self):
+        """Open a colour picker for the outside cell edge colour."""
+        current = self.canvas._edge_outside_colour
+        c = QColorDialog.getColor(QColor(current), self, "Edge colour for outside cells")
+        if c.isValid():
+            self.canvas._edge_outside_colour = c.name()
+            self._edge_outside_swatch.set_colour(c.name())
+            self.canvas.update_edge_for_outside()
+
+    def _pick_edge_inside_colour(self):
+        """Open a colour picker for the inside cell edge colour."""
+        current = self.canvas._edge_inside_colour
+        c = QColorDialog.getColor(QColor(current), self, "Edge colour for inside cells")
+        if c.isValid():
+            self.canvas._edge_inside_colour = c.name()
+            self._edge_inside_swatch.set_colour(c.name())
+            self.canvas.update_edge_for_outside()
 
     def _pick_layer_colour(self, category_key, swatch):
         """Open a colour picker for the mesh/volume colour of a layer category."""
