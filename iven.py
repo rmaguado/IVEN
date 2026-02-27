@@ -152,10 +152,13 @@ class ChannelColourDialog(QDialog):
     def __init__(
         self,
         column_name: str,
-        unique_values=None,
-        current_mode: str = "continuous",
-        gradient_colours: Optional[Tuple] = None,
-        category_colours: Optional[Dict] = None,
+        unique_values,
+        current_mode: str,
+        gradient_colours: Tuple,
+        category_colours: Dict,
+        edge_outside_colour: str,
+        edge_inside_colour: str,
+        bg_colour: str,
         parent=None,
     ):
         super().__init__(parent)
@@ -169,6 +172,10 @@ class ChannelColourDialog(QDialog):
         )
         self._category_colours = dict(category_colours) if category_colours else {}
         self._cat_swatches = {}
+
+        self.edge_outside_colour = edge_outside_colour
+        self.edge_inside_colour = edge_inside_colour
+        self.bg_colour = bg_colour
 
         layout = QVBoxLayout(self)
         layout.setSpacing(10)
@@ -258,12 +265,83 @@ class ChannelColourDialog(QDialog):
 
         self._set_section_visibility(current_mode)
 
+        # here will add other colour settings TODO
+
+        # Edge + Background colour pickers
+        #colour_grid = QVBoxLayout()
+        #colour_grid.setSpacing(8)
+
+        # Outside
+        outside_row = QHBoxLayout()
+        outside_row.setSpacing(6)
+        self._edge_outside_swatch = ClickableSwatch("#000000", 14)
+        self._edge_outside_swatch.setToolTip("Edge colour for outside cells")
+        self._edge_outside_swatch.clicked.connect(self._pick_edge_outside_colour)
+        edge_outside_lbl = QLabel("Outside")
+        edge_outside_lbl.setStyleSheet("font-size: 10px; color: #777; background: transparent;")
+        outside_row.addWidget(self._edge_outside_swatch)
+        outside_row.addWidget(edge_outside_lbl)
+        outside_row.addStretch()
+        outside_row.addSpacing(8)
+        layout.addLayout(outside_row)
+
+        # Inside
+        inside_row = QHBoxLayout()
+        inside_row.setSpacing(6)
+        self._edge_inside_swatch = ClickableSwatch("#ffffff", 14)
+        self._edge_inside_swatch.setToolTip("Edge colour for inside cells")
+        self._edge_inside_swatch.clicked.connect(self._pick_edge_inside_colour)
+        edge_inside_lbl = QLabel("Inside")
+        edge_inside_lbl.setStyleSheet("font-size: 10px; color: #777; background: transparent;")
+        inside_row.addWidget(self._edge_inside_swatch)
+        inside_row.addWidget(edge_inside_lbl)
+        inside_row.addStretch()
+        inside_row.addSpacing(8)
+        layout.addLayout(inside_row)
+
+        # Background
+        bg_row = QHBoxLayout()
+        bg_row.setSpacing(6)
+        self._bg_swatch = ClickableSwatch("#f0f0f0", 14)
+        self._bg_swatch.setToolTip("Canvas background colour")
+        self._bg_swatch.clicked.connect(self._pick_bg_colour)
+        bg_lbl = QLabel("Background")
+        bg_lbl.setStyleSheet("font-size: 10px; color: #777; background: transparent;")
+        bg_row.addWidget(self._bg_swatch)
+        bg_row.addWidget(bg_lbl)
+        bg_row.addStretch()
+        layout.addLayout(bg_row)
+
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
         )
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
+
+    def _pick_edge_outside_colour(self):
+        """Open a colour picker for the outside cell edge colour."""
+        current = self.edge_outside_colour
+        c = QColorDialog.getColor(QColor(current), self, "Edge colour for outside cells")
+        if c.isValid():
+            self.edge_outside_colour = c.name()
+            self._edge_outside_swatch.set_colour(c.name())
+
+    def _pick_edge_inside_colour(self):
+        """Open a colour picker for the inside cell edge colour."""
+        current = self.edge_inside_colour
+        c = QColorDialog.getColor(QColor(current), self, "Edge colour for inside cells")
+        if c.isValid():
+            self.edge_inside_colour = c.name()
+            self._edge_inside_swatch.set_colour(c.name())
+
+    def _pick_bg_colour(self):
+        """Open a colour picker for the canvas background colour."""
+        current = self.bg_colour
+        c = QColorDialog.getColor(QColor(current), self, "Canvas background colour")
+        if c.isValid():
+            self.bg_colour = c.name()
+            self._bg_swatch.set_colour(c.name())
 
     def _on_mode_radio_changed(self, continuous_checked: bool):
         mode = "continuous" if continuous_checked else "categorical"
@@ -367,6 +445,10 @@ class Session:
     icm_outlier_bool: np.ndarray = field(default_factory=lambda: np.array([]))
     icm_outlier_std: float = 1.7  # std threshold for auto outlier detection
     icm_outlier_faces: List = field(default_factory=list)
+
+    mean_cav_icm_distance: float = 0.0
+    mean_te_distance: float = 0.0
+    mean_cav_icm_distance_norm: float = 0.0
 
     # Angle to exclude points not on ICM surface
     angle_threshold: float = 30
@@ -899,6 +981,19 @@ def compile_distances(session):
     return session
 
 
+def get_neighbour_distances(xyz, ids_list):
+    nbr_distances = []
+    for te_id in ids_list:
+        other_te_ids = [id for id in ids_list if id != te_id]
+        point_xyz = xyz[[te_id]]
+        other_xyz = xyz[other_te_ids]
+
+        te_distances = cdist(point_xyz, other_xyz)
+        dist = te_distances.min()
+        nbr_distances.append(dist)
+
+    return nbr_distances
+
 def compile_migration(session):
 
     # will normalize by the mean distance of trophectoderm cells (te) to their nearest te neighbour
@@ -909,22 +1004,14 @@ def compile_migration(session):
     distances = {"ID": [], "distance_to_icm": [], "distance_to_icm_norm": []}
     # Store line endpoints: list of (outlier_xyz, closest_surface_xyz)
     migration_lines = []
-    te_nbr_distances = []
+    
 
     if len(outlier_ids) == 0 or len(te_ids) <= 1:
         session.migration = pd.DataFrame()
         session.migration_lines = migration_lines
         return session
 
-    for te_id in te_ids:
-        other_te_ids = [id for id in te_ids if id != te_id]
-        point_xyz = session.xyz[[te_id]]
-        other_xyz = session.xyz[other_te_ids]
-
-        te_distances = cdist(point_xyz, other_xyz)
-        dist = te_distances.min()
-        te_nbr_distances.append(dist)
-
+    te_nbr_distances = get_neighbour_distances(session.xyz, te_ids)
     mean_te_spacing = np.mean(te_nbr_distances)
 
     for pid in outlier_ids:
@@ -1526,7 +1613,7 @@ class EmbryoCanvas(FigureCanvasQTAgg):
         elif self._active_channel == "__cavity__":
             self._draw_fixed_legend(
                 [
-                    ("Cavity-Adjacent", self._cavity_colours["cavity"]),
+                    ("Cavity-adjacent", self._cavity_colours["cavity"]),
                     ("Inside", self._cavity_colours["inside"]),
                     ("Outside", self._cavity_colours["outside"]),
                 ],
@@ -1761,7 +1848,7 @@ class CavitySettingsDialog(QDialog):
         self.slider = QSlider(Qt.Orientation.Horizontal)
         self.slider.setRange(0, 100)
         self.slider.setValue(current_angle)
-        self.value_label = QLabel(str(current_angle))
+        self.value_label = QLabel(str(current_angle) + "°")
         self.value_label.setFixedWidth(40)
         self.value_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.value_label.setStyleSheet("font-size: 11px; color: #555;")
@@ -1771,7 +1858,7 @@ class CavitySettingsDialog(QDialog):
         slider_row.addWidget(self.value_label)
         layout.addLayout(slider_row)
 
-        self.checkbox = QCheckBox('Align ICM surface to PE centroid')
+        self.checkbox = QCheckBox('Align ICM surface to TE centroid')
         self.checkbox.setChecked(use_pe_centroid)
         layout.addWidget(self.checkbox)
 
@@ -1783,7 +1870,7 @@ class CavitySettingsDialog(QDialog):
         layout.addWidget(buttons)
 
     def _on_slider_changed(self, val):
-        self.value_label.setText(str(val))
+        self.value_label.setText(str(val) + "°")
 
     def get_values(self) -> dict:
         try:
@@ -1942,7 +2029,7 @@ class IvenMainWindow(QMainWindow):
 
         self.btn_manual_nbr = QAction(QIcon(abspath("assets/pair.png")), "", self)
         self.btn_manual_nbr.setCheckable(True)
-        self.btn_manual_nbr.setToolTip("Click two cells to toggle neighbour pair")
+        self.btn_manual_nbr.setToolTip("Click on two cells to toggle neighbour pair")
         toolbar.addAction(self.btn_manual_nbr)
 
         self.btn_show_nbr_lines = QAction(QIcon(abspath("assets/lines.png")), "", self)
@@ -2024,54 +2111,6 @@ class IvenMainWindow(QMainWindow):
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
         )
         cs_layout.addWidget(self.colour_combo)
-        cs_layout.addSpacing(4)
-
-        # Edge + Background colour pickers
-        colour_grid = QVBoxLayout()
-        colour_grid.setSpacing(8)
-
-        # Outside
-        outside_row = QHBoxLayout()
-        outside_row.setSpacing(6)
-        self._edge_outside_swatch = ClickableSwatch("#000000", 14)
-        self._edge_outside_swatch.setToolTip("Edge colour for outside cells")
-        self._edge_outside_swatch.clicked.connect(self._pick_edge_outside_colour)
-        edge_outside_lbl = QLabel("Outside")
-        edge_outside_lbl.setStyleSheet("font-size: 10px; color: #777; background: transparent;")
-        outside_row.addWidget(self._edge_outside_swatch)
-        outside_row.addWidget(edge_outside_lbl)
-        outside_row.addStretch()
-        outside_row.addSpacing(8)
-        colour_grid.addLayout(outside_row)
-
-        # Inside
-        inside_row = QHBoxLayout()
-        inside_row.setSpacing(6)
-        self._edge_inside_swatch = ClickableSwatch("#ffffff", 14)
-        self._edge_inside_swatch.setToolTip("Edge colour for inside cells")
-        self._edge_inside_swatch.clicked.connect(self._pick_edge_inside_colour)
-        edge_inside_lbl = QLabel("Inside")
-        edge_inside_lbl.setStyleSheet("font-size: 10px; color: #777; background: transparent;")
-        inside_row.addWidget(self._edge_inside_swatch)
-        inside_row.addWidget(edge_inside_lbl)
-        inside_row.addStretch()
-        inside_row.addSpacing(8)
-        colour_grid.addLayout(inside_row)
-
-        # Background
-        bg_row = QHBoxLayout()
-        bg_row.setSpacing(6)
-        self._bg_swatch = ClickableSwatch("#f0f0f0", 14)
-        self._bg_swatch.setToolTip("Canvas background colour")
-        self._bg_swatch.clicked.connect(self._pick_bg_colour)
-        bg_lbl = QLabel("Background")
-        bg_lbl.setStyleSheet("font-size: 10px; color: #777; background: transparent;")
-        bg_row.addWidget(self._bg_swatch)
-        bg_row.addWidget(bg_lbl)
-        bg_row.addStretch()
-        colour_grid.addLayout(bg_row)
-
-        cs_layout.addLayout(colour_grid)
         cs_layout.addSpacing(4)
 
         rl.addWidget(colour_section)
@@ -2218,14 +2257,14 @@ class IvenMainWindow(QMainWindow):
             name_lbl = QLabel(label_text)
             name_lbl.setStyleSheet(
                 "font-size: 11px; font-weight: 500; color: #3a3d4a;"
-                "background: transparent;"
+                f"background: {bg};"
             )
             name_container.addWidget(swatch)
             name_container.addWidget(name_lbl)
             name_container.addStretch()
 
             name_widget = QWidget()
-            name_widget.setStyleSheet("background: transparent;")
+            name_widget.setStyleSheet(f"background: {bg};")
             name_widget.setLayout(name_container)
             row_layout.addWidget(name_widget, 0, 0)
 
@@ -2240,7 +2279,7 @@ class IvenMainWindow(QMainWindow):
                 ]
                 chk.setToolTip(tips[ci - 1])
                 chk_wrap = QWidget()
-                chk_wrap.setStyleSheet("background: transparent;")
+                chk_wrap.setStyleSheet(f"background: {bg};")
                 cl = QHBoxLayout(chk_wrap)
                 cl.setContentsMargins(0, 0, 0, 0)
                 cl.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -2832,23 +2871,6 @@ class IvenMainWindow(QMainWindow):
         self.canvas.set_legend_visible(checked)
         self.show_message("Legend: on" if checked else "Legend: off")
 
-    def _pick_edge_outside_colour(self):
-        """Open a colour picker for the outside cell edge colour."""
-        current = self.canvas._edge_outside_colour
-        c = QColorDialog.getColor(QColor(current), self, "Edge colour for outside cells")
-        if c.isValid():
-            self.canvas._edge_outside_colour = c.name()
-            self._edge_outside_swatch.set_colour(c.name())
-            self.canvas.update_edge_for_outside()
-
-    def _pick_bg_colour(self):
-        """Open a colour picker for the canvas background colour."""
-        current = self.canvas._bg_colour
-        c = QColorDialog.getColor(QColor(current), self, "Canvas background colour")
-        if c.isValid():
-            self.canvas.set_background_colour(c.name())
-            self._bg_swatch.set_colour(c.name())
-
     def _update_cell_counts(self):
         """Refresh the cell count labels in the stats section."""
         s = self.session
@@ -2872,15 +2894,6 @@ class IvenMainWindow(QMainWindow):
             self._lbl_cavity.setText(f"Cavity-adjacent: {n_cav}")
         else:
             self._lbl_cavity.setText("Cavity-adjacent: 0")
-
-    def _pick_edge_inside_colour(self):
-        """Open a colour picker for the inside cell edge colour."""
-        current = self.canvas._edge_inside_colour
-        c = QColorDialog.getColor(QColor(current), self, "Edge colour for inside cells")
-        if c.isValid():
-            self.canvas._edge_inside_colour = c.name()
-            self._edge_inside_swatch.set_colour(c.name())
-            self.canvas.update_edge_for_outside()
 
     def _pick_layer_colour(self, category_key, swatch):
         """Open a colour picker for the mesh/volume colour of a layer category."""
@@ -2909,7 +2922,7 @@ class IvenMainWindow(QMainWindow):
             self._show_fixed_colour_dialog(
                 "Cavity Adjacency",
                 [
-                    ("Cavity-Adjacent", "cavity"),
+                    ("Cavity-adjacent", "cavity"),
                     ("Inside", "inside"),
                     ("Outside", "outside"),
                 ],
@@ -2948,6 +2961,9 @@ class IvenMainWindow(QMainWindow):
             current_mode=current_mode,
             gradient_colours=gradient,
             category_colours=cat_colours,
+            edge_outside_colour=self.canvas._edge_outside_colour,
+            edge_inside_colour=self.canvas._edge_inside_colour,
+            bg_colour=self.canvas._bg_colour,
             parent=self,
         )
         if dlg.exec():
@@ -2956,6 +2972,11 @@ class IvenMainWindow(QMainWindow):
                 "gradient": dlg.get_gradient_colours(),
                 "categories": dlg.get_category_colours(),
             }
+            self.canvas._edge_outside_colour = dlg.edge_outside_colour
+            self.canvas._edge_inside_colour = dlg.edge_inside_colour
+            self.canvas.set_background_colour(dlg.bg_colour)
+            self.canvas.update_edge_for_outside()
+
             self.canvas._channel_settings[col_name] = new_settings
             self._apply_colour_mode()
 
@@ -3046,9 +3067,23 @@ class IvenMainWindow(QMainWindow):
         s = compile_distances(s)
         s = compile_migration(s)
 
+        cav_icm_ids = [id for id in s.inside_ids2 if (id in s.cav_adj_ids) and (id not in s.icm_outlier_ids)]
+        cav_icm_nbr_distances = get_neighbour_distances(s.xyz, cav_icm_ids)
+        s.mean_cav_icm_distance = float(np.mean(cav_icm_nbr_distances))
+
+        te_ids = s.outside_ids2
+        te_nbr_distances = get_neighbour_distances(s.xyz, te_ids)
+        s.mean_te_distance = float(np.mean(te_nbr_distances))
+        s.mean_cav_icm_distance_norm = s.mean_cav_icm_distance / s.mean_te_distance
+
         hull = ConvexHull(s.xyz)
         s.info = pd.DataFrame(
-            {"Volume": [hull.volume]}
+            {
+                "Volume": [hull.volume],
+                "Mean Distance Cavity-adjacent ICM": s.mean_cav_icm_distance,
+                "Mean Distance Cavity-adjacent ICM (norm)": s.mean_cav_icm_distance_norm,
+                "Mean Distance TE": s.mean_te_distance,
+            }
         )
 
         for col in s.headings[4:-1]:
