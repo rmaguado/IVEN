@@ -345,8 +345,9 @@ class Session:
     use_pe_centroid: bool = False
 
     # Threshold params
-    thresh_method: str = "Automatic (cell position independent)"
-    thresh_val: float | List[float] = 0.5
+    thresh_method: str = "Automatic (cell position dependent)"
+    thresh_k: float = 0.5
+    thresh_vals: List[float] = field(default_factory=list)
 
     is_checkpoint: bool = False
     outside_loaded: bool = False
@@ -719,26 +720,30 @@ def eval_threshold(session):
         session.thresh_method = "Automatic (cell position independent)"
 
     if session.thresh_method == "None":
-        session.thresh_val = float(np.nanmax(session.dist_matrix1) * 100)
+        val = float(np.nanmax(session.dist_matrix1) * 100)
+        session.thresh_vals = [val, val]
         session.results_df["threshold"] = ["-"] * session.num_cells
     elif session.thresh_method == "Manual":
+        val = session.thresh_k
+        session.thresh_vals = [val, val]
         session.results_df["threshold"] = (
-            np.ones(session.num_cells) * session.thresh_val
+            np.ones(session.num_cells) * val
         )
     elif session.thresh_method == "Automatic (cell position dependent)":
+        k = session.thresh_k
         dists_out = session.dist_matrix1[session.outside_ids2, :]
         dists_in = session.dist_matrix1[session.inside_ids2, :]
-        k = float(session.thresh_val)
         p75_out = np.nanpercentile(dists_out, 75)
         iqr_out = scipy.stats.iqr(dists_out, nan_policy="omit")
         p75_in = np.nanpercentile(dists_in, 75)
         iqr_in = scipy.stats.iqr(dists_in, nan_policy="omit")
-        session.thresh_val = [p75_out + (k * iqr_out), p75_in + (k * iqr_in)]
+        session.thresh_vals = [p75_out + (k * iqr_out), p75_in + (k * iqr_in)]
     elif session.thresh_method == "Automatic (cell position independent)":
-        k = float(session.thresh_val)
+        k = k = session.thresh_k
         p75 = np.nanpercentile(session.dist_matrix1, 75)
         iqr = scipy.stats.iqr(session.dist_matrix1, nan_policy="omit")
-        session.thresh_val = p75 + (k * iqr)
+        val = p75 + (k * iqr)
+        session.thresh_vals = [val, val]
     return session
 
 
@@ -747,14 +752,12 @@ def check_nbrs(session):
     dist1 = session.dist_matrix1
     session.nbr_matrix2 = nbr2 = np.copy(nbr1)
     session.dist_matrix2 = dist2 = np.copy(dist1)
-    auto = session.thresh_method == "Automatic (cell position dependent)"
+    
     for i in range(session.num_cells):
         for j in range(session.num_cells):
-            if auto:
-                outside = session.outside_bool2[i] or session.outside_bool2[j]
-                thresh = session.thresh_val[0] if outside else session.thresh_val[1]
-            else:
-                thresh = session.thresh_val
+            has_outside = session.outside_bool2[i] or session.outside_bool2[j]
+            has_inside = (not session.outside_bool2[i]) or (not session.outside_bool2[j])
+            thresh = session.thresh_vals[0] if has_outside else session.thresh_vals[1]
             if nbr1[i, j] == 1 and dist1[i, j] > thresh:
                 nbr2[i, j] = 0
                 dist2[i, j] = np.nan
@@ -1629,18 +1632,33 @@ class ThresholdDialog(QDialog):
             rb.setChecked(checked)
             self.method_group.addButton(rb)
             layout.addWidget(rb)
-        h = QHBoxLayout()
+
+        self._val_row = QWidget()
+        h = QHBoxLayout(self._val_row)
+        h.setContentsMargins(0, 0, 0, 0)
         h.addWidget(QLabel("k-value / threshold:"))
         self.val_edit = QLineEdit("0.5")
         self.val_edit.setFixedWidth(80)
         h.addWidget(self.val_edit)
-        layout.addLayout(h)
+        layout.addWidget(self._val_row)
+
+        # Update visibility when method changes
+        self.method_group.buttonToggled.connect(self._on_method_changed)
+
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
         )
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
+
+    def _on_method_changed(self, button, checked):
+        if not checked:
+            return
+        method = button.text()
+        # Hide k-value input
+        needs_val = method not in ("None")
+        self._val_row.setVisible(needs_val)
 
     def get_values(self):
         checked_button = self.method_group.checkedButton()
@@ -2462,8 +2480,8 @@ class IvenMainWindow(QMainWindow):
             return
         s.nbr_matrix1 = nbr_matrix(s)
         if not s.thresh_method:
-            s.thresh_method = "Automatic (cell position independent)"
-            s.thresh_val = 0.5
+            s.thresh_method = "Automatic (cell position dependent)"
+            s.thresh_k = 0.5
         s = eval_threshold(s)
         s = check_nbrs(s)
         s = compile_results(s)
@@ -2475,13 +2493,17 @@ class IvenMainWindow(QMainWindow):
         if dlg.exec():
             method, val = dlg.get_values()
             self.session.thresh_method = method
-            try:
-                self.session.thresh_val = float(val)
-                self.show_message(f"Threshold: {method}, value={val}")
-            except ValueError:
-                self.session.thresh_method = "Automatic (cell position independent)"
-                self.session.thresh_val = 0.5
-                self.show_message(f"Threshold: {method}, value=0.5")
+            if method in ("None"):
+                self.session.thresh_k = 0.5
+                self.show_message(f"Threshold: {method}")
+            else:
+                try:
+                    self.session.thresh_k = float(val)
+                    self.show_message(f"Threshold: {method}, value={val}")
+                except ValueError:
+                    self.session.thresh_method = "Automatic (cell position dependent)"
+                    self.session.thresh_k = 0.5
+                    self.show_message(f"Threshold: {method}, k=0.5")
 
     def _toggle_manual_nbr_mode(self, checked):
         if checked:
@@ -2818,8 +2840,8 @@ class IvenMainWindow(QMainWindow):
         if len(s.nbr_matrix2) == 0:
             s.nbr_matrix1 = nbr_matrix(s)
             if not s.thresh_method:
-                s.thresh_method = "Automatic (cell position independent)"
-                s.thresh_val = 0.5
+                s.thresh_method = "Automatic (cell position dependent)"
+                s.thresh_k = 0.5
             s = eval_threshold(s)
             s = check_nbrs(s)
 
