@@ -508,7 +508,7 @@ def detect_icm_outliers_numneighbours(
 def detect_icm_outliers(
     data_xyz: np.ndarray, inside_ids: np.ndarray, std_threshold
 ):
-    """Detect ICM cells that have migrated away from the main ICM cluster.
+    """Detect ICM cells that are migrating away from the main ICM cluster.
 
     Uses distance from the ICM centroid: cells further than
     ``std_threshold`` standard-deviations from the mean distance are
@@ -701,7 +701,7 @@ def detect_cavity_adjacent_angle(
     else:
         vhat = w
 
-    if np.dot(vhat, te_centroid - cav_centroid) < 0:
+    if np.dot(vhat, te_centroid - icm_centroid) < 0:
         vhat = -vhat
 
     te_proj = (te_pts - cav_centroid) @ vhat
@@ -1285,7 +1285,7 @@ class EmbryoCanvas(FigureCanvasQTAgg):
         self.draw_idle()
 
     def draw_migration_lines(self):
-        """Draw lines from each migrated cell to its nearest point on the ICM surface."""
+        """Draw lines from each migrating cell to its nearest point on the ICM surface."""
         self._clear_list(self._migration_line_artists)
         self._migration_line_artists = []
         s = self.session
@@ -1887,9 +1887,30 @@ class IvenMainWindow(QMainWindow):
 
         self.btn_manual_outside = QAction(QIcon(abspath("assets/outside_manual.png")), "", self)
         self.btn_manual_outside.setCheckable(True)
-        self.btn_manual_outside.setToolTip("Click cells to flip inside / outside [I]")
+        self.btn_manual_outside.setToolTip("Click on cells to flip inside / outside [I]")
         self.btn_manual_outside.setShortcut("I")
         toolbar.addAction(self.btn_manual_outside)
+
+        toolbar.addSeparator()
+
+        self.btn_auto_migration = QAction(QIcon(abspath("assets/outlier_auto.png")), "", self)
+        #self.btn_auto_migration.setCheckable(True)
+        self.btn_auto_migration.setToolTip("Auto-detect migrating status for ICM cells [Ctrl+Shift+O]")
+        self.btn_auto_migration.setShortcut("Ctrl+Shift+O")
+        toolbar.addAction(self.btn_auto_migration)
+
+        self.btn_manual_migration = QAction(QIcon(abspath("assets/outlier_manual.png")), "", self)
+        self.btn_manual_migration.setCheckable(True)
+        self.btn_manual_migration.setToolTip("Click on ICM cells to toggle migrating status [O]")
+        self.btn_manual_migration.setShortcut("O")
+        toolbar.addAction(self.btn_manual_migration)
+
+        self.btn_migration_lines = QAction(QIcon(abspath("assets/lines.png")), "", self)
+        self.btn_migration_lines.setCheckable(True)
+        self.btn_migration_lines.setChecked(False)
+        self.btn_migration_lines.setToolTip("Show/hide migration distance lines [G]")
+        self.btn_migration_lines.setShortcut("G")
+        toolbar.addAction(self.btn_migration_lines)
 
         toolbar.addSeparator()
 
@@ -1905,13 +1926,6 @@ class IvenMainWindow(QMainWindow):
         self.btn_manual_cavity.setShortcut("C")
         toolbar.addAction(self.btn_manual_cavity)
 
-        self.btn_cavity_settings = QAction(QIcon(abspath("assets/alpha.png")), "", self)
-        self.btn_cavity_settings.setToolTip(
-            "Cavity detection settings (outlier exclusion) [Ctrl+A]"
-        )
-        self.btn_cavity_settings.setShortcut("Ctrl+A")
-        toolbar.addAction(self.btn_cavity_settings)
-
         self.btn_icm_surface = QAction(QIcon(abspath("assets/vol_on.png")), "", self)
         self.btn_icm_surface.setCheckable(True)
         self.btn_icm_surface.setChecked(False)
@@ -1919,35 +1933,12 @@ class IvenMainWindow(QMainWindow):
         self.btn_icm_surface.setShortcut("M")
         toolbar.addAction(self.btn_icm_surface)
 
-        self.btn_migration_lines = QAction(QIcon(abspath("assets/lines.png")), "", self)
-        self.btn_migration_lines.setCheckable(True)
-        self.btn_migration_lines.setChecked(False)
-        self.btn_migration_lines.setToolTip("Show/hide migration distance lines [G]")
-        self.btn_migration_lines.setShortcut("G")
-        toolbar.addAction(self.btn_migration_lines)
-
-        self.btn_auto_migration = QAction(QIcon(abspath("assets/outlier_auto.png")), "", self)
-        #self.btn_auto_migration.setCheckable(True)
-        self.btn_auto_migration.setToolTip("Auto-detect migrated/outlier status for ICM cells [Ctrl+Shift+O]")
-        self.btn_auto_migration.setShortcut("Ctrl+Shift+O")
-        toolbar.addAction(self.btn_auto_migration)
-
-        self.btn_manual_migration = QAction(QIcon(abspath("assets/outlier_manual.png")), "", self)
-        self.btn_manual_migration.setCheckable(True)
-        self.btn_manual_migration.setToolTip("Click ICM cells to toggle migrated/outlier status [O]")
-        self.btn_manual_migration.setShortcut("O")
-        toolbar.addAction(self.btn_manual_migration)
-
         toolbar.addSeparator()
 
         # Neighbours section
         self.btn_auto_nbr = QAction(QIcon(abspath("assets/neighbours.png")), "", self)
         self.btn_auto_nbr.setToolTip("Compute Delaunay neighbours")
         toolbar.addAction(self.btn_auto_nbr)
-
-        self.btn_set_threshold = QAction(QIcon(abspath("assets/threshold.png")), "", self)
-        self.btn_set_threshold.setToolTip("Configure distance threshold")
-        toolbar.addAction(self.btn_set_threshold)
 
         self.btn_manual_nbr = QAction(QIcon(abspath("assets/pair.png")), "", self)
         self.btn_manual_nbr.setCheckable(True)
@@ -1960,6 +1951,17 @@ class IvenMainWindow(QMainWindow):
         toolbar.addAction(self.btn_show_nbr_lines)
 
         toolbar.addSeparator()
+
+        self.btn_cavity_settings = QAction(QIcon(abspath("assets/alpha.png")), "", self)
+        self.btn_cavity_settings.setToolTip(
+            "Cavity detection settings (outlier exclusion) [Ctrl+A]"
+        )
+        self.btn_cavity_settings.setShortcut("Ctrl+A")
+        toolbar.addAction(self.btn_cavity_settings)
+
+        self.btn_set_threshold = QAction(QIcon(abspath("assets/threshold.png")), "", self)
+        self.btn_set_threshold.setToolTip("Configure distance threshold")
+        toolbar.addAction(self.btn_set_threshold)
 
         # Legend toggle
         self.btn_toggle_legend = QAction(QIcon(abspath("assets/legend.png")), "", self)
@@ -2455,7 +2457,7 @@ class IvenMainWindow(QMainWindow):
             self.btn_manual_nbr.setChecked(False)
             self.btn_manual_migration.setChecked(False)
         self.show_message(
-            "Click cells to toggle inside / outside."
+            "Click on cells to toggle inside / outside."
             if checked
             else "Manual outside mode off."
         )
@@ -2567,7 +2569,7 @@ class IvenMainWindow(QMainWindow):
             self.btn_manual_nbr.setChecked(False)
             self.btn_manual_migration.setChecked(False)
         self.show_message(
-            "Click cells to toggle cavity adjacency."
+            "Click on cells to toggle cavity adjacency."
             if checked
             else "Manual cavity mode off."
         )
@@ -2602,7 +2604,7 @@ class IvenMainWindow(QMainWindow):
 
             self.session.use_pe_centroid = vals["use_pe_centroid"]
 
-            self.show_message(rf"ICM outlier σ={vals['outlier_std']:.1f}")
+            self.show_message(rf"ICM Migration σ={vals['outlier_std']:.1f}")
             #self._auto_detect_cavity()
 
     def _auto_detect_neighbours(self):
@@ -2751,7 +2753,7 @@ class IvenMainWindow(QMainWindow):
                 self.canvas.clear_migration_lines()
                 self.canvas.draw_migration_lines()
             is_outlier = s.icm_outlier_bool[idx] == 1
-            label = "Migration (outlier)" if is_outlier else "ICM (not migrated)"
+            label = "Migration (outlier)" if is_outlier else "ICM (not migrating)"
             self.show_message(f"Cell {cell_id} -> {label}")
             return
 
