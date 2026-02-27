@@ -342,6 +342,7 @@ class Session:
 
     results_df: pd.DataFrame = field(default_factory=pd.DataFrame)
     dist: pd.DataFrame = field(default_factory=pd.DataFrame)
+    info: pd.DataFrame = field(default_factory=pd.DataFrame)
 
     outside_bool1: np.ndarray = field(default_factory=lambda: np.array([]))
     outside_ids1: np.ndarray = field(default_factory=lambda: np.array([]))
@@ -459,18 +460,15 @@ class Session:
                 self.results_df["cavity_adj_bool"] = cab
             self.cavity_loaded = True
 
+    def save_checkpoint(self, output_path: Path) -> None:
+        with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
+            self.df.to_excel(writer, sheet_name="Data", index=False)
+            self.results_df.to_excel(writer, sheet_name="Results", index=False)
+            self.dist.to_excel(writer, sheet_name="Distances", index=False)
+            if hasattr(self, "migration") and not self.migration.empty:
+                self.migration.to_excel(writer, sheet_name="Migration", index=False)
 
-def save_checkpoint(session, output_path: Path) -> None:
-    with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
-        session.df.to_excel(writer, sheet_name="Data", index=False)
-        session.results_df.to_excel(writer, sheet_name="Results", index=False)
-        session.dist.to_excel(writer, sheet_name="Distances", index=False)
-        if hasattr(session, "migration") and not session.migration.empty:
-            session.migration.to_excel(writer, sheet_name="Migration", index=False)
-
-        for sheet_name, df in (session.extra_sheets or {}).items():
-            df.to_excel(writer, sheet_name=sheet_name, index=False)
-
+            self.info.to_excel(writer, sheet_name="Info", index=False)
 
 def classify_outside(pts, n):
     hull = ConvexHull(pts)
@@ -3025,6 +3023,14 @@ class IvenMainWindow(QMainWindow):
             return
         self.output_dir = Path(d)
 
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        fname = self.output_dir / f"output_{self.output_dir.stem}.xlsx"
+
+        if os.path.exists(fname):
+            QMessageBox.critical(self, "Save Error", "Output file already exists. Skipping save.")
+            return
+
+
         if len(s.nbr_matrix2) == 0:
             s.nbr_matrix1 = nbr_matrix(s)
             if not s.thresh_method:
@@ -3038,6 +3044,11 @@ class IvenMainWindow(QMainWindow):
         s = compile_distances(s)
         s = compile_migration(s)
 
+        hull = ConvexHull(s.xyz)
+        s.info = pd.DataFrame(
+            {"Volume": [hull.volume]}
+        )
+
         for col in s.headings[4:-1]:
             id_to_val = dict(zip(s.results_df["ID"], s.results_df[col]))
             s.dist[f"{col}_cell1"] = s.dist["cell_id1"].map(id_to_val)
@@ -3045,11 +3056,9 @@ class IvenMainWindow(QMainWindow):
 
         self.session = s
 
-        self.output_dir.mkdir(parents=True, exist_ok=True)
-        fname = self.output_dir / f"IVEN2_{self.output_dir.stem}.xlsx"
-        save_checkpoint(s, fname)
+        s.save_checkpoint(fname)
 
-        img_path = self.output_dir / f"IVEN2_{self.output_dir.stem}.png"
+        img_path = self.output_dir / f"figure.png"
         self.canvas.fig.savefig(str(img_path), dpi=300)
 
         self.show_message(f"Saved to {fname}")
