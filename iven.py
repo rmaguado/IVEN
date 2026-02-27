@@ -123,7 +123,7 @@ class ClickableSwatch(QLabel):
     
     def border_color(self) -> str:
         luminance = self.get_luminance()
-        return "#000000" if luminance > 0.9 else self._colour
+        return "#000000" if luminance > 0.8 else self._colour
 
     def _update_style(self):
         text_colour = self.text_color()
@@ -159,6 +159,7 @@ class ChannelColourDialog(QDialog):
         edge_outside_colour: str,
         edge_inside_colour: str,
         bg_colour: str,
+        force_categorical: bool,
         parent=None,
     ):
         super().__init__(parent)
@@ -181,7 +182,52 @@ class ChannelColourDialog(QDialog):
         layout.setSpacing(10)
         layout.setContentsMargins(16, 16, 16, 16)
 
-        lbl = QLabel(f"Colour settings for '{column_name}':")
+        lbl = QLabel(f"General Colour Settings")
+        lbl.setStyleSheet("font-weight: 600; font-size: 12px; color: #1a1a1a;")
+        layout.addWidget(lbl)
+
+        # Outside
+        outside_row = QHBoxLayout()
+        outside_row.setSpacing(6)
+        self._edge_outside_swatch = ClickableSwatch(edge_outside_colour, 14)
+        self._edge_outside_swatch.setToolTip("Edge colour for outside cells")
+        self._edge_outside_swatch.clicked.connect(self._pick_edge_outside_colour)
+        edge_outside_lbl = QLabel("Outside")
+        edge_outside_lbl.setStyleSheet("font-size: 10px; color: #777; background: transparent;")
+        outside_row.addWidget(self._edge_outside_swatch)
+        outside_row.addWidget(edge_outside_lbl)
+        outside_row.addStretch()
+        outside_row.addSpacing(8)
+        layout.addLayout(outside_row)
+
+        # Inside
+        inside_row = QHBoxLayout()
+        inside_row.setSpacing(6)
+        self._edge_inside_swatch = ClickableSwatch(edge_inside_colour, 14)
+        self._edge_inside_swatch.setToolTip("Edge colour for inside cells")
+        self._edge_inside_swatch.clicked.connect(self._pick_edge_inside_colour)
+        edge_inside_lbl = QLabel("Inside")
+        edge_inside_lbl.setStyleSheet("font-size: 10px; color: #777; background: transparent;")
+        inside_row.addWidget(self._edge_inside_swatch)
+        inside_row.addWidget(edge_inside_lbl)
+        inside_row.addStretch()
+        inside_row.addSpacing(8)
+        layout.addLayout(inside_row)
+
+        # Background
+        bg_row = QHBoxLayout()
+        bg_row.setSpacing(6)
+        self._bg_swatch = ClickableSwatch(bg_colour, 14)
+        self._bg_swatch.setToolTip("Canvas background colour")
+        self._bg_swatch.clicked.connect(self._pick_bg_colour)
+        bg_lbl = QLabel("Background")
+        bg_lbl.setStyleSheet("font-size: 10px; color: #777; background: transparent;")
+        bg_row.addWidget(self._bg_swatch)
+        bg_row.addWidget(bg_lbl)
+        bg_row.addStretch()
+        layout.addLayout(bg_row)
+
+        lbl = QLabel(f"Channel Colour Settings ({column_name})")
         lbl.setStyleSheet("font-weight: 600; font-size: 12px; color: #1a1a1a;")
         layout.addWidget(lbl)
 
@@ -195,6 +241,10 @@ class ChannelColourDialog(QDialog):
         self._mode_group = QButtonGroup(self)
         self._mode_group.addButton(self._rb_continuous)
         self._mode_group.addButton(self._rb_categorical)
+
+        if force_categorical:
+            self._rb_continuous.setEnabled(False)
+
         if current_mode == "categorical":
             self._rb_categorical.setChecked(True)
         else:
@@ -264,53 +314,6 @@ class ChannelColourDialog(QDialog):
             layout.addWidget(self._cat_widget)
 
         self._set_section_visibility(current_mode)
-
-        # here will add other colour settings TODO
-
-        # Edge + Background colour pickers
-        #colour_grid = QVBoxLayout()
-        #colour_grid.setSpacing(8)
-
-        # Outside
-        outside_row = QHBoxLayout()
-        outside_row.setSpacing(6)
-        self._edge_outside_swatch = ClickableSwatch("#000000", 14)
-        self._edge_outside_swatch.setToolTip("Edge colour for outside cells")
-        self._edge_outside_swatch.clicked.connect(self._pick_edge_outside_colour)
-        edge_outside_lbl = QLabel("Outside")
-        edge_outside_lbl.setStyleSheet("font-size: 10px; color: #777; background: transparent;")
-        outside_row.addWidget(self._edge_outside_swatch)
-        outside_row.addWidget(edge_outside_lbl)
-        outside_row.addStretch()
-        outside_row.addSpacing(8)
-        layout.addLayout(outside_row)
-
-        # Inside
-        inside_row = QHBoxLayout()
-        inside_row.setSpacing(6)
-        self._edge_inside_swatch = ClickableSwatch("#ffffff", 14)
-        self._edge_inside_swatch.setToolTip("Edge colour for inside cells")
-        self._edge_inside_swatch.clicked.connect(self._pick_edge_inside_colour)
-        edge_inside_lbl = QLabel("Inside")
-        edge_inside_lbl.setStyleSheet("font-size: 10px; color: #777; background: transparent;")
-        inside_row.addWidget(self._edge_inside_swatch)
-        inside_row.addWidget(edge_inside_lbl)
-        inside_row.addStretch()
-        inside_row.addSpacing(8)
-        layout.addLayout(inside_row)
-
-        # Background
-        bg_row = QHBoxLayout()
-        bg_row.setSpacing(6)
-        self._bg_swatch = ClickableSwatch("#f0f0f0", 14)
-        self._bg_swatch.setToolTip("Canvas background colour")
-        self._bg_swatch.clicked.connect(self._pick_bg_colour)
-        bg_lbl = QLabel("Background")
-        bg_lbl.setStyleSheet("font-size: 10px; color: #777; background: transparent;")
-        bg_row.addWidget(self._bg_swatch)
-        bg_row.addWidget(bg_lbl)
-        bg_row.addStretch()
-        layout.addLayout(bg_row)
 
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
@@ -2913,7 +2916,7 @@ class IvenMainWindow(QMainWindow):
         if col_name == "Inside / Outside":
             self._show_fixed_colour_dialog(
                 "Inside / Outside",
-                [("Outside", "outside"), ("Inside", "inside")],
+                ["outside", "inside"],
                 self.canvas._outside_colours,
                 "__outside__",
             )
@@ -2921,11 +2924,7 @@ class IvenMainWindow(QMainWindow):
         if col_name == "Cavity Adjacency":
             self._show_fixed_colour_dialog(
                 "Cavity Adjacency",
-                [
-                    ("Cavity-adjacent", "cavity"),
-                    ("Inside", "inside"),
-                    ("Outside", "outside"),
-                ],
+                ["cavity", "inside", "outside"],
                 self.canvas._cavity_colours,
                 "__cavity__",
             )
@@ -2933,11 +2932,7 @@ class IvenMainWindow(QMainWindow):
         if col_name == "Migration":
             self._show_fixed_colour_dialog(
                 "Migration",
-                [
-                    ("Inside", "inside"),
-                    ("Outside", "outside"),
-                    ("Migration", "migration"),
-                ],
+                ["migration", "inside", "outside"],
                 self.canvas._migration_colours,
                 "__migration__",
             )
@@ -2964,6 +2959,7 @@ class IvenMainWindow(QMainWindow):
             edge_outside_colour=self.canvas._edge_outside_colour,
             edge_inside_colour=self.canvas._edge_inside_colour,
             bg_colour=self.canvas._bg_colour,
+            force_categorical=False,
             parent=self,
         )
         if dlg.exec():
@@ -2981,6 +2977,37 @@ class IvenMainWindow(QMainWindow):
             self._apply_colour_mode()
 
     def _show_fixed_colour_dialog(self, title, labels_keys, colour_dict, mode_key):
+        """
+        "Inside / Outside",
+        [("Outside", "outside"), ("Inside", "inside")],
+        self.canvas._outside_colours,
+        "__outside__",
+        """
+        dlg = ChannelColourDialog(
+            column_name=title,
+            unique_values=labels_keys,
+            current_mode="categorical",
+            gradient_colours=(),
+            category_colours=colour_dict,
+            edge_outside_colour=self.canvas._edge_outside_colour,
+            edge_inside_colour=self.canvas._edge_inside_colour,
+            bg_colour=self.canvas._bg_colour,
+            force_categorical=True,
+            parent=self,
+        )
+        if dlg.exec():
+            self.canvas._edge_outside_colour = dlg.edge_outside_colour
+            self.canvas._edge_inside_colour = dlg.edge_inside_colour
+            self.canvas.set_background_colour(dlg.bg_colour)
+            self.canvas.update_edge_for_outside()
+
+            category_colours = dlg.get_category_colours()
+            for k in labels_keys:
+                colour_dict[k] = category_colours[k]
+
+            self._apply_colour_mode()
+
+    def _show_fixed_colour_dialog_v1(self, title, labels_keys, colour_dict, mode_key):
         """Open a simple colour picker for fixed-mode (inside / outside or cavity) colours."""
         dlg = QDialog(self)
         dlg.setWindowTitle(f"Colour Settings: {title}")
