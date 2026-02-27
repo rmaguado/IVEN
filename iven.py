@@ -1554,8 +1554,8 @@ class EmbryoCanvas(FigureCanvasQTAgg):
         """Draw a simple categorical legend with a title and list of (label, hex_colour) items."""
         start_y = 0.90
         line_h = 0.035
-        x_swatch = 0.82
-        x_text = 0.85
+        x_swatch = 0.87
+        x_text = 0.90
 
         for i, (label, hex_c) in enumerate(items):
             y = start_y - i * line_h
@@ -1589,7 +1589,7 @@ class EmbryoCanvas(FigureCanvasQTAgg):
         vmin, vmax = np.nanmin(vals), np.nanmax(vals)
 
         # Inset axes for colourbar
-        cbar_ax = self.fig.add_axes((0.82, 0.25, 0.03, 0.5))
+        cbar_ax = self.fig.add_axes((0.87, 0.25, 0.03, 0.5))
         cbar_ax.set_facecolor("none")
         norm = Normalize(vmin=vmin, vmax=vmax)
         sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
@@ -1606,8 +1606,8 @@ class EmbryoCanvas(FigureCanvasQTAgg):
         n = len(items)
         start_y = 0.90
         line_h = 0.035
-        x_swatch = 0.82
-        x_text = 0.85
+        x_swatch = 0.87
+        x_text = 0.90
 
         for i, (val, hex_c) in enumerate(items):
             y = start_y - i * line_h
@@ -2018,51 +2018,61 @@ class IvenMainWindow(QMainWindow):
         cs_layout.addWidget(colour_header)
 
         self.colour_combo = QComboBox()
-        self.colour_combo.addItems(["Inside / Outside", "Cavity Adjacency"])
+        self.colour_combo.addItems(["Inside / Outside", "Cavity Adjacency", "Migration"])
         self.colour_combo.setToolTip("Choose how cells are coloured in the 3-D view")
         self.colour_combo.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
         )
         cs_layout.addWidget(self.colour_combo)
+        cs_layout.addSpacing(4)
 
-        # Edge colour pickers
-        edge_row = QHBoxLayout()
-        edge_row.setSpacing(6)
-        edge_lbl = QLabel("Edge:")
-        edge_lbl.setStyleSheet("font-size: 11px; color: #555; background: transparent;")
-        edge_row.addWidget(edge_lbl)
+        # Edge + Background colour pickers
+        colour_grid = QVBoxLayout()
+        colour_grid.setSpacing(8)
 
-        edge_outside_lbl = QLabel("Outside")
-        edge_outside_lbl.setStyleSheet("font-size: 10px; color: #777; background: transparent;")
+        # Outside
+        outside_row = QHBoxLayout()
+        outside_row.setSpacing(6)
         self._edge_outside_swatch = ClickableSwatch("#000000", 14)
         self._edge_outside_swatch.setToolTip("Edge colour for outside cells")
         self._edge_outside_swatch.clicked.connect(self._pick_edge_outside_colour)
-        edge_row.addWidget(self._edge_outside_swatch)
-        edge_row.addWidget(edge_outside_lbl)
-        edge_row.addSpacing(8)
+        edge_outside_lbl = QLabel("Outside")
+        edge_outside_lbl.setStyleSheet("font-size: 10px; color: #777; background: transparent;")
+        outside_row.addWidget(self._edge_outside_swatch)
+        outside_row.addWidget(edge_outside_lbl)
+        outside_row.addStretch()
+        outside_row.addSpacing(8)
+        colour_grid.addLayout(outside_row)
 
-        edge_inside_lbl = QLabel("Inside")
-        edge_inside_lbl.setStyleSheet("font-size: 10px; color: #777; background: transparent;")
+        # Inside
+        inside_row = QHBoxLayout()
+        inside_row.setSpacing(6)
         self._edge_inside_swatch = ClickableSwatch("#ffffff", 14)
         self._edge_inside_swatch.setToolTip("Edge colour for inside cells")
         self._edge_inside_swatch.clicked.connect(self._pick_edge_inside_colour)
-        edge_row.addWidget(self._edge_inside_swatch)
-        edge_row.addWidget(edge_inside_lbl)
-        edge_row.addStretch()
-        cs_layout.addLayout(edge_row)
+        edge_inside_lbl = QLabel("Inside")
+        edge_inside_lbl.setStyleSheet("font-size: 10px; color: #777; background: transparent;")
+        inside_row.addWidget(self._edge_inside_swatch)
+        inside_row.addWidget(edge_inside_lbl)
+        inside_row.addStretch()
+        inside_row.addSpacing(8)
+        colour_grid.addLayout(inside_row)
 
-        # Background colour picker
+        # Background
         bg_row = QHBoxLayout()
         bg_row.setSpacing(6)
-        bg_lbl = QLabel("Background:")
-        bg_lbl.setStyleSheet("font-size: 11px; color: #555; background: transparent;")
-        bg_row.addWidget(bg_lbl)
         self._bg_swatch = ClickableSwatch("#f0f0f0", 14)
         self._bg_swatch.setToolTip("Canvas background colour")
         self._bg_swatch.clicked.connect(self._pick_bg_colour)
+        bg_lbl = QLabel("Background")
+        bg_lbl.setStyleSheet("font-size: 10px; color: #777; background: transparent;")
         bg_row.addWidget(self._bg_swatch)
+        bg_row.addWidget(bg_lbl)
         bg_row.addStretch()
-        cs_layout.addLayout(bg_row)
+        colour_grid.addLayout(bg_row)
+
+        cs_layout.addLayout(colour_grid)
+        cs_layout.addSpacing(4)
 
         rl.addWidget(colour_section)
 
@@ -2198,7 +2208,7 @@ class IvenMainWindow(QMainWindow):
             name_container = QHBoxLayout()
             name_container.setSpacing(6)
             name_container.setContentsMargins(0, 0, 0, 0)
-            swatch = ClickableSwatch(colour, 10)
+            swatch = ClickableSwatch(colour, 14)
             swatch.setToolTip(f"Click to change {label_text} mesh/volume colour")
             swatch.clicked.connect(
                 lambda checked=False, k=key, c=colour, sw=swatch: self._pick_layer_colour(
