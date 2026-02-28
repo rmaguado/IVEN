@@ -1475,6 +1475,28 @@ class EmbryoCanvas(FigureCanvasQTAgg):
         self.ax.apply_aspect = apply_aspect_nonsquare
         self.ax.set_box_aspect([1, 1, 1])
 
+        _original_get_proj = self.ax.get_proj.__func__ # type: ignore
+        ax_ref = self.ax
+
+        def _corrected_get_proj():
+            M = _original_get_proj(ax_ref)
+            fig = ax_ref.get_figure()
+            pos = ax_ref.get_position(original=False)
+            fig_w, fig_h = fig.get_size_inches() * fig.dpi # type: ignore
+            ax_w = pos.width * fig_w
+            ax_h = pos.height * fig_h
+            if ax_w == 0 or ax_h == 0:
+                return M
+            aspect = ax_w / ax_h
+            correction = np.eye(4)
+            if aspect > 1:
+                correction[0, 0] = 1.0 / aspect
+            else:
+                correction[1, 1] = aspect
+            return correction @ M
+
+        self.ax.get_proj = _corrected_get_proj
+
         xyz = self.session.xyz
         mins, maxs = xyz.min(0), xyz.max(0)
         c = (mins + maxs) / 2
