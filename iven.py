@@ -46,15 +46,16 @@ from PyQt6.QtWidgets import (
     QGridLayout,
     QColorDialog,
     QScrollArea,
-    QCheckBox
+    QCheckBox,
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QSize
 from PyQt6.QtGui import QFont, QIcon, QAction, QColor
 
-if getattr(sys, 'frozen', False):
-    base_path = sys._MEIPASS # type: ignore
+if getattr(sys, "frozen", False):
+    base_path = sys._MEIPASS  # type: ignore
 else:
     base_path = os.path.dirname(os.path.abspath(__file__))
+
 
 def abspath(path):
     return os.path.join(base_path, path)
@@ -120,7 +121,7 @@ class ClickableSwatch(QLabel):
     def text_color(self) -> str:
         luminance = self.get_luminance()
         return "#000000" if luminance > 0.179 else "#ffffff"
-    
+
     def border_color(self) -> str:
         luminance = self.get_luminance()
         return "#000000" if luminance > 0.8 else self._colour
@@ -193,7 +194,9 @@ class ChannelColourDialog(QDialog):
         self._edge_outside_swatch.setToolTip("Edge colour for outside cells")
         self._edge_outside_swatch.clicked.connect(self._pick_edge_outside_colour)
         edge_outside_lbl = QLabel("Outside")
-        edge_outside_lbl.setStyleSheet("font-size: 10px; color: #777; background: transparent;")
+        edge_outside_lbl.setStyleSheet(
+            "font-size: 10px; color: #777; background: transparent;"
+        )
         outside_row.addWidget(self._edge_outside_swatch)
         outside_row.addWidget(edge_outside_lbl)
         outside_row.addStretch()
@@ -207,7 +210,9 @@ class ChannelColourDialog(QDialog):
         self._edge_inside_swatch.setToolTip("Edge colour for inside cells")
         self._edge_inside_swatch.clicked.connect(self._pick_edge_inside_colour)
         edge_inside_lbl = QLabel("Inside")
-        edge_inside_lbl.setStyleSheet("font-size: 10px; color: #777; background: transparent;")
+        edge_inside_lbl.setStyleSheet(
+            "font-size: 10px; color: #777; background: transparent;"
+        )
         inside_row.addWidget(self._edge_inside_swatch)
         inside_row.addWidget(edge_inside_lbl)
         inside_row.addStretch()
@@ -325,7 +330,9 @@ class ChannelColourDialog(QDialog):
     def _pick_edge_outside_colour(self):
         """Open a colour picker for the outside cell edge colour."""
         current = self.edge_outside_colour
-        c = QColorDialog.getColor(QColor(current), self, "Edge colour for outside cells")
+        c = QColorDialog.getColor(
+            QColor(current), self, "Edge colour for outside cells"
+        )
         if c.isValid():
             self.edge_outside_colour = c.name()
             self._edge_outside_swatch.set_colour(c.name())
@@ -555,6 +562,7 @@ class Session:
 
             self.info.to_excel(writer, sheet_name="Info", index=False)
 
+
 def classify_outside(pts, n):
     hull = ConvexHull(pts)
     outside_ids = np.unique(hull.simplices)
@@ -564,11 +572,12 @@ def classify_outside(pts, n):
 
 
 def detect_icm_outliers_numneighbours(
-    inside_ids: np.ndarray, nbr_matrix,
+    inside_ids: np.ndarray,
+    nbr_matrix,
 ):
     if len(inside_ids) < 4:
         return []
-    
+
     num_neighbours = {}
 
     cell1_ids, cell2_ids = np.where(np.triu(nbr_matrix, k=1) == 1)
@@ -585,14 +594,14 @@ def detect_icm_outliers_numneighbours(
             else:
                 num_neighbours[id2] = 1
 
-    more_than_two = [int(ins_id) for ins_id, num_nbr in num_neighbours.items() if num_nbr >= 2]
+    more_than_two = [
+        int(ins_id) for ins_id, num_nbr in num_neighbours.items() if num_nbr >= 2
+    ]
     outliers = [ins_id for ins_id in inside_ids if ins_id not in more_than_two]
     return outliers
 
 
-def detect_icm_outliers(
-    data_xyz: np.ndarray, inside_ids: np.ndarray, std_threshold
-):
+def detect_icm_outliers(data_xyz: np.ndarray, inside_ids: np.ndarray, std_threshold):
     """Detect ICM cells that are migrating away from the main ICM cluster.
 
     Uses distance from the ICM centroid: cells further than
@@ -613,20 +622,12 @@ def detect_icm_outliers(
     dists = cdist(icm_pts, icm_pts)  # (n_icm, n_icm)
     dists += np.eye(n_icm, n_icm) * 1e8
     nearest_dist = dists.min(axis=1)
-    nearest_ids = np.argmin(dists, axis=1)
 
-    mean_dist = np.mean(nearest_dist)
     median_dist = np.median(nearest_dist)
-
-    dists[nearest_ids] = 1e8
-
-    for i in nearest_ids:
-        dists[i] = 1e8
-    second_nearest = dists.min(axis=1)
 
     threshold = median_dist * std_threshold
 
-    outliers_bool = (nearest_dist > threshold) * (second_nearest > threshold)
+    outliers_bool = nearest_dist > threshold
 
     return [int(inside_ids[i]) for i in np.where(outliers_bool)[0]]
 
@@ -715,7 +716,7 @@ def detect_cavity_adjacent_angle(
     outside_ids: np.ndarray,
     outlier_ids: List[int],
     angle_threshold_deg: float,
-    use_pe_centroid: bool
+    use_pe_centroid: bool,
 ) -> List[int]:
     filtered_inside_ids = [i for i in inside_ids if i not in outlier_ids]
 
@@ -731,9 +732,9 @@ def detect_cavity_adjacent_angle(
     icm_centered = icm_pts - icm_centroid
 
     if use_pe_centroid:
-        u,v,w = tangent_frame(icm_to_te)
+        u, v, w = tangent_frame(icm_to_te)
     else:
-        u,v,w = flat_frame(icm_centered)
+        u, v, w = flat_frame(icm_centered)
 
     # orient normal toward the TE centroid
     if np.dot(w, icm_to_te) < 0:
@@ -836,9 +837,7 @@ def eval_threshold(session):
     elif session.thresh_method == "Manual":
         val = session.thresh_k
         session.thresh_vals = [val, val]
-        session.results_df["threshold"] = (
-            np.ones(session.num_cells) * val
-        )
+        session.results_df["threshold"] = np.ones(session.num_cells) * val
     elif session.thresh_method == "Automatic (cell position dependent)":
         k = session.thresh_k
         dists_out = session.dist_matrix1[session.outside_ids2, :]
@@ -862,11 +861,13 @@ def check_nbrs(session):
     dist1 = session.dist_matrix1
     session.nbr_matrix2 = nbr2 = np.copy(nbr1)
     session.dist_matrix2 = dist2 = np.copy(dist1)
-    
+
     for i in range(session.num_cells):
         for j in range(session.num_cells):
             has_outside = session.outside_bool2[i] or session.outside_bool2[j]
-            has_inside = (not session.outside_bool2[i]) or (not session.outside_bool2[j])
+            has_inside = (not session.outside_bool2[i]) or (
+                not session.outside_bool2[j]
+            )
             thresh = session.thresh_vals[0] if has_outside else session.thresh_vals[1]
             if nbr1[i, j] == 1 and dist1[i, j] > thresh:
                 nbr2[i, j] = 0
@@ -880,7 +881,7 @@ def point_to_triangle_distance(p, a, b, c):
     ab = b - a
     ac = c - a
     ap = p - a
-    
+
     # Project p onto plane of triangle using a unit normal
     normal = np.cross(ab, ac)
     norm_len = np.linalg.norm(normal)
@@ -895,18 +896,18 @@ def point_to_triangle_distance(p, a, b, c):
     n_hat = normal / norm_len
     signed_dist = np.dot(ap, n_hat)
     closest_on_plane = p - signed_dist * n_hat
-    
+
     # Check if projection lies inside triangle using barycentric coordinates
     v0 = ac
     v1 = ab
     v2 = closest_on_plane - a
-    
+
     dot00 = np.dot(v0, v0)
     dot01 = np.dot(v0, v1)
     dot02 = np.dot(v0, v2)
     dot11 = np.dot(v1, v1)
     dot12 = np.dot(v1, v2)
-    
+
     denom = dot00 * dot11 - dot01 * dot01
     if abs(denom) < 1e-15:
         d1, cp1 = point_to_segment_distance(p, a, b)
@@ -918,7 +919,7 @@ def point_to_triangle_distance(p, a, b, c):
     inv_denom = 1.0 / denom
     u = (dot11 * dot02 - dot01 * dot12) * inv_denom
     v = (dot00 * dot12 - dot01 * dot02) * inv_denom
-    
+
     if u >= 0 and v >= 0 and u + v <= 1:
         # Projection is inside triangle
         return abs(signed_dist), closest_on_plane
@@ -929,6 +930,7 @@ def point_to_triangle_distance(p, a, b, c):
     d3, cp3 = point_to_segment_distance(p, c, a)
     results = [(d1, cp1), (d2, cp2), (d3, cp3)]
     return min(results, key=lambda x: x[0])
+
 
 def point_to_segment_distance(p, a, b):
     """Return (distance, closest_point) from point p to segment (a, b)."""
@@ -997,6 +999,7 @@ def get_neighbour_distances(xyz, ids_list):
 
     return nbr_distances
 
+
 def compile_migration(session):
 
     # will normalize by the mean distance of trophectoderm cells (te) to their nearest te neighbour
@@ -1007,7 +1010,6 @@ def compile_migration(session):
     distances = {"ID": [], "distance_to_icm": [], "distance_to_icm_norm": []}
     # Store line endpoints: list of (outlier_xyz, closest_surface_xyz)
     migration_lines = []
-    
 
     if len(outlier_ids) == 0 or len(te_ids) <= 1:
         session.migration = pd.DataFrame()
@@ -1019,8 +1021,8 @@ def compile_migration(session):
 
     for pid in outlier_ids:
         point_xyz = session.xyz[pid]
-        
-        best_dist = float('inf')
+
+        best_dist = float("inf")
         best_closest_pt = None
         for face in faces:
             a, b, c = face
@@ -1066,7 +1068,7 @@ _CATEGORIES = ("inside", "outside", "cavity", "not_cavity")
 class EmbryoCanvas(FigureCanvasQTAgg):
     cell_picked = pyqtSignal(int)
 
-    COL_MIG = np.array([134 / 256, 66 / 256, 201 / 256, 1.0]) # purple
+    COL_MIG = np.array([134 / 256, 66 / 256, 201 / 256, 1.0])  # purple
     COL_ALL = np.array([255 / 256, 102 / 256, 204 / 256, 1.0])  # pink
     COL_CAV = np.array([255 / 256, 204 / 256, 0.0, 1.0])  # yellow
     COL_IN = np.array([0.3, 0.7, 1.0, 1.0])  # blue
@@ -1102,10 +1104,7 @@ class EmbryoCanvas(FigureCanvasQTAgg):
         self.fig.patch.set_facecolor(self._bg_colour)
         super().__init__(self.fig)
         self.setParent(parent)
-        self.setSizePolicy(
-            QSizePolicy.Policy.Expanding,
-            QSizePolicy.Policy.Expanding
-        )
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
 
         self._outer_hull_lines = []
         self._outer_hull_visible = True
@@ -1381,7 +1380,7 @@ class EmbryoCanvas(FigureCanvasQTAgg):
         s = self.session
         if s is None or self.ax is None:
             return
-        if not hasattr(s, 'migration_lines') or len(s.migration_lines) == 0:
+        if not hasattr(s, "migration_lines") or len(s.migration_lines) == 0:
             return
         for outlier_pt, surface_pt in s.migration_lines:
             (ln,) = self.ax.plot(
@@ -1396,8 +1395,14 @@ class EmbryoCanvas(FigureCanvasQTAgg):
             self._migration_line_artists.append(ln)
             # Small marker at the surface contact point
             sct = self.ax.scatter(
-                [surface_pt[0]], [surface_pt[1]], [surface_pt[2]], # type: ignore
-                color=self.COL_MIG, s=30, marker="x", linewidths=1.5, zorder=10,
+                [surface_pt[0]],
+                [surface_pt[1]],
+                [surface_pt[2]],  # type: ignore
+                color=self.COL_MIG,
+                s=30,
+                marker="x",
+                linewidths=1.5,
+                zorder=10,
             )
             self._migration_line_artists.append(sct)
         self.draw_idle()
@@ -1470,19 +1475,19 @@ class EmbryoCanvas(FigureCanvasQTAgg):
         def apply_aspect_nonsquare(position=None):
             if position is None:
                 position = self.ax.get_position(original=True)
-            self.ax._set_position(position, 'active') # type: ignore
+            self.ax._set_position(position, "active")  # type: ignore
 
         self.ax.apply_aspect = apply_aspect_nonsquare
         self.ax.set_box_aspect([1, 1, 1])
 
-        _original_get_proj = self.ax.get_proj.__func__ # type: ignore
+        _original_get_proj = self.ax.get_proj.__func__  # type: ignore
         ax_ref = self.ax
 
         def _corrected_get_proj():
             M = _original_get_proj(ax_ref)
             fig = ax_ref.get_figure()
             pos = ax_ref.get_position(original=False)
-            fig_w, fig_h = fig.get_size_inches() * fig.dpi # type: ignore
+            fig_w, fig_h = fig.get_size_inches() * fig.dpi  # type: ignore
             ax_w = pos.width * fig_w
             ax_h = pos.height * fig_h
             if ax_w == 0 or ax_h == 0:
@@ -1755,7 +1760,7 @@ class EmbryoCanvas(FigureCanvasQTAgg):
             return
 
         polys = self.session.icm_outlier_faces
-        
+
         mesh = Poly3DCollection(
             polys,
             alpha=0.25,
@@ -1883,7 +1888,7 @@ class CavitySettingsDialog(QDialog):
         slider_row.addWidget(self.value_label)
         layout.addLayout(slider_row)
 
-        self.checkbox = QCheckBox('Align ICM surface to TE centroid')
+        self.checkbox = QCheckBox("Align ICM surface to TE centroid")
         self.checkbox.setChecked(use_pe_centroid)
         layout.addWidget(self.checkbox)
 
@@ -1905,7 +1910,7 @@ class CavitySettingsDialog(QDialog):
         return {
             "outlier_std": max(0.0, ostd),
             "angle_threshold": self.slider.value(),
-            "use_pe_centroid": self.checkbox.isChecked()
+            "use_pe_centroid": self.checkbox.isChecked(),
         }
 
 
@@ -1934,8 +1939,7 @@ class IvenMainWindow(QMainWindow):
         toolbar.setMovable(False)
         toolbar.setIconSize(QSize(20, 20))
         toolbar.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
-        toolbar.setStyleSheet(
-            """
+        toolbar.setStyleSheet("""
             QToolBar {
                 background: #e4e4e4;
                 border-bottom: 1px solid #cccccc;
@@ -1964,12 +1968,13 @@ class IvenMainWindow(QMainWindow):
                 border: 1px solid #2563eb;
             }
             QToolButton::menu-indicator { image: none; width: 0; }
-        """
-        )
+        """)
         self.addToolBar(toolbar)
 
         # File section
-        self.btn_open_file = QAction(QIcon(abspath("assets/openfile.png")), "", parent=self)
+        self.btn_open_file = QAction(
+            QIcon(abspath("assets/openfile.png")), "", parent=self
+        )
         self.btn_open_file.setToolTip("Open data file [Ctrl+O]")
         self.btn_open_file.setShortcut("Ctrl+O")
         toolbar.addAction(self.btn_open_file)
@@ -1992,28 +1997,42 @@ class IvenMainWindow(QMainWindow):
         toolbar.addSeparator()
 
         # Inside / Outside section
-        self.btn_auto_outside = QAction(QIcon(abspath("assets/outside_auto.png")), "", self)
+        self.btn_auto_outside = QAction(
+            QIcon(abspath("assets/outside_auto.png")), "", self
+        )
         self.btn_auto_outside.setToolTip("Classify cells as inside / outside [Ctrl+I]")
         self.btn_auto_outside.setShortcut("Ctrl+I")
         toolbar.addAction(self.btn_auto_outside)
 
-        self.btn_manual_outside = QAction(QIcon(abspath("assets/outside_manual.png")), "", self)
+        self.btn_manual_outside = QAction(
+            QIcon(abspath("assets/outside_manual.png")), "", self
+        )
         self.btn_manual_outside.setCheckable(True)
-        self.btn_manual_outside.setToolTip("Click on cells to flip inside / outside [I]")
+        self.btn_manual_outside.setToolTip(
+            "Click on cells to flip inside / outside [I]"
+        )
         self.btn_manual_outside.setShortcut("I")
         toolbar.addAction(self.btn_manual_outside)
 
         toolbar.addSeparator()
 
-        self.btn_auto_migration = QAction(QIcon(abspath("assets/outlier_auto.png")), "", self)
-        #self.btn_auto_migration.setCheckable(True)
-        self.btn_auto_migration.setToolTip("Auto-detect migrating status for ICM cells [Ctrl+Shift+O]")
+        self.btn_auto_migration = QAction(
+            QIcon(abspath("assets/outlier_auto.png")), "", self
+        )
+        # self.btn_auto_migration.setCheckable(True)
+        self.btn_auto_migration.setToolTip(
+            "Auto-detect migrating status for ICM cells [Ctrl+Shift+O]"
+        )
         self.btn_auto_migration.setShortcut("Ctrl+Shift+O")
         toolbar.addAction(self.btn_auto_migration)
 
-        self.btn_manual_migration = QAction(QIcon(abspath("assets/outlier_manual.png")), "", self)
+        self.btn_manual_migration = QAction(
+            QIcon(abspath("assets/outlier_manual.png")), "", self
+        )
         self.btn_manual_migration.setCheckable(True)
-        self.btn_manual_migration.setToolTip("Click on ICM cells to toggle migrating status [O]")
+        self.btn_manual_migration.setToolTip(
+            "Click on ICM cells to toggle migrating status [O]"
+        )
         self.btn_manual_migration.setShortcut("O")
         toolbar.addAction(self.btn_manual_migration)
 
@@ -2027,12 +2046,16 @@ class IvenMainWindow(QMainWindow):
         toolbar.addSeparator()
 
         # Cavity section
-        self.btn_auto_cavity = QAction(QIcon(abspath("assets/cavity_auto.png")), "", self)
+        self.btn_auto_cavity = QAction(
+            QIcon(abspath("assets/cavity_auto.png")), "", self
+        )
         self.btn_auto_cavity.setToolTip("Auto-detect cavity-adjacent cells [Ctrl+C]")
         self.btn_auto_cavity.setShortcut("Ctrl+C")
         toolbar.addAction(self.btn_auto_cavity)
 
-        self.btn_manual_cavity = QAction(QIcon(abspath("assets/cavity_manual.png")), "", self)
+        self.btn_manual_cavity = QAction(
+            QIcon(abspath("assets/cavity_manual.png")), "", self
+        )
         self.btn_manual_cavity.setCheckable(True)
         self.btn_manual_cavity.setToolTip("Manually toggle cavity adjacency [C]")
         self.btn_manual_cavity.setShortcut("C")
@@ -2071,7 +2094,9 @@ class IvenMainWindow(QMainWindow):
         self.btn_cavity_settings.setShortcut("Ctrl+A")
         toolbar.addAction(self.btn_cavity_settings)
 
-        self.btn_set_threshold = QAction(QIcon(abspath("assets/threshold.png")), "", self)
+        self.btn_set_threshold = QAction(
+            QIcon(abspath("assets/threshold.png")), "", self
+        )
         self.btn_set_threshold.setToolTip("Configure distance threshold")
         toolbar.addAction(self.btn_set_threshold)
 
@@ -2084,7 +2109,9 @@ class IvenMainWindow(QMainWindow):
         toolbar.addAction(self.btn_toggle_legend)
 
         # Colour settings (opens colour picker dialog for current channel)
-        self.btn_colour_settings = QAction(QIcon(abspath("assets/colour.png")), "", self)
+        self.btn_colour_settings = QAction(
+            QIcon(abspath("assets/colour.png")), "", self
+        )
         self.btn_colour_settings.setToolTip("Colour settings for current channel")
         toolbar.addAction(self.btn_colour_settings)
 
@@ -2130,7 +2157,9 @@ class IvenMainWindow(QMainWindow):
         cs_layout.addWidget(colour_header)
 
         self.colour_combo = QComboBox()
-        self.colour_combo.addItems(["Inside / Outside", "Cavity Adjacency", "Migration"])
+        self.colour_combo.addItems(
+            ["Inside / Outside", "Cavity Adjacency", "Migration"]
+        )
         self.colour_combo.setToolTip("Choose how cells are coloured in the 3-D view")
         self.colour_combo.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
@@ -2167,7 +2196,12 @@ class IvenMainWindow(QMainWindow):
         self._lbl_inside = QLabel("Inside: —")
         self._lbl_cavity = QLabel("Cavity-adjacent: —")
         _count_style = "font-size: 11px; color: #3a3d4a; background: transparent;"
-        for lbl in (self._lbl_total, self._lbl_outside, self._lbl_inside, self._lbl_cavity):
+        for lbl in (
+            self._lbl_total,
+            self._lbl_outside,
+            self._lbl_inside,
+            self._lbl_cavity,
+        ):
             lbl.setStyleSheet(_count_style)
             stats_layout.addWidget(lbl)
 
@@ -2545,7 +2579,9 @@ class IvenMainWindow(QMainWindow):
         # ICM points that are cavity-adjacent (inside AND cavity-adj)
         icm_cav_mask = (s.outside_bool2 == 0) & (s.cav_adj_bool == 1)
         icm_cav_indices = np.where(icm_cav_mask)[0]
-        icm_cav_indices = [idx for idx in icm_cav_indices if idx not in s.icm_outlier_ids]
+        icm_cav_indices = [
+            idx for idx in icm_cav_indices if idx not in s.icm_outlier_ids
+        ]
 
         if len(icm_cav_indices) < 3:
             return
@@ -2599,7 +2635,7 @@ class IvenMainWindow(QMainWindow):
             s.outside_ids2,
             outlier_ids=s.icm_outlier_ids,
             angle_threshold_deg=s.angle_threshold,
-            use_pe_centroid=s.use_pe_centroid
+            use_pe_centroid=s.use_pe_centroid,
         )
 
         s.cav_adj_ids = np.array(cavity_ids, dtype=np.int64)
@@ -2669,7 +2705,7 @@ class IvenMainWindow(QMainWindow):
             self.session.use_pe_centroid = vals["use_pe_centroid"]
 
             self.show_message(rf"ICM Migration σ={vals['outlier_std']:.1f}")
-            #self._auto_detect_cavity()
+            # self._auto_detect_cavity()
 
     def _auto_detect_neighbours(self):
         s = self.session
@@ -2746,7 +2782,7 @@ class IvenMainWindow(QMainWindow):
                 self.btn_migration_lines.setChecked(False)
                 return
             # Compute migration distances (and line endpoints) if not yet done
-            if not hasattr(s, 'migration_lines') or len(s.migration_lines) == 0:
+            if not hasattr(s, "migration_lines") or len(s.migration_lines) == 0:
                 s = compile_migration(s)
                 self.session = s
             self.canvas.draw_migration_lines()
@@ -2796,7 +2832,9 @@ class IvenMainWindow(QMainWindow):
         if self.btn_manual_migration.isChecked():
             # Only allow toggling on ICM (inside) cells
             if len(s.outside_bool2) > 0 and s.outside_bool2[idx] == 1:
-                self.show_message(f"Cell {cell_id} is an outside cell — only ICM cells can be toggled as migration.")
+                self.show_message(
+                    f"Cell {cell_id} is an outside cell — only ICM cells can be toggled as migration."
+                )
                 return
             # Initialise outlier arrays if needed
             if len(s.icm_outlier_bool) == 0:
@@ -2810,7 +2848,7 @@ class IvenMainWindow(QMainWindow):
             s.icm_outlier_bool = np.zeros(s.num_cells, dtype=np.int64)
             if len(s.icm_outlier_ids) > 0:
                 s.icm_outlier_bool[s.icm_outlier_ids] = 1
-            
+
             self._apply_colour_mode()
             self.canvas.refresh_overlays()
             if self.btn_migration_lines.isChecked():
@@ -3099,9 +3137,10 @@ class IvenMainWindow(QMainWindow):
         fname = self.output_dir / f"output_{self.output_dir.stem}.xlsx"
 
         if os.path.exists(fname):
-            QMessageBox.critical(self, "Save Error", "Output file already exists. Skipping save.")
+            QMessageBox.critical(
+                self, "Save Error", "Output file already exists. Skipping save."
+            )
             return
-
 
         if len(s.nbr_matrix2) == 0:
             s.nbr_matrix1 = nbr_matrix(s)
@@ -3116,7 +3155,11 @@ class IvenMainWindow(QMainWindow):
         s = compile_distances(s)
         s = compile_migration(s)
 
-        cav_icm_ids = [id for id in s.inside_ids2 if (id in s.cav_adj_ids) and (id not in s.icm_outlier_ids)]
+        cav_icm_ids = [
+            id
+            for id in s.inside_ids2
+            if (id in s.cav_adj_ids) and (id not in s.icm_outlier_ids)
+        ]
         cav_icm_nbr_distances = get_neighbour_distances(s.xyz, cav_icm_ids)
         s.mean_cav_icm_distance = float(np.mean(cav_icm_nbr_distances))
 
@@ -3154,7 +3197,7 @@ class IvenMainWindow(QMainWindow):
 
 
 def main():
-    style_file = abspath('assets/style.txt')
+    style_file = abspath("assets/style.txt")
     with open(style_file, "r") as f:
         stylesheet = f.read()
     app = QApplication(sys.argv)
