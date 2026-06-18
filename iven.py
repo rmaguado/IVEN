@@ -481,22 +481,22 @@ class Session:
             sheet_names = xl.sheet_names
 
             self.extra_sheets = {
-                name: xl.parse(name, header=0)
+                name: xl.parse(name, header=0)  # type: ignore
                 for name in sheet_names
                 if name not in {"Data", "Results", "Distances", "Migration"}
             }
 
             if "Results" in sheet_names and "Distances" in sheet_names:
-                results_sheet = xl.parse("Results", header=0)
-                dist_sheet = xl.parse("Distances", header=0)
-                data_sheet = xl.parse("Data", header=0)
+                results_sheet = xl.parse("Results", header=0)  # type: ignore
+                dist_sheet = xl.parse("Distances", header=0)  # type: ignore
+                data_sheet = xl.parse("Data", header=0)  # type: ignore
                 self._populate_from_data_sheet(data_sheet)
                 self.results_df = results_sheet.copy()
                 self.dist = dist_sheet.copy()
                 self.is_checkpoint = True
                 self._restore_checkpoint()
             else:
-                raw = xl.parse(sheet_names[0], header=0)
+                raw = xl.parse(sheet_names[0], header=0)  # type: ignore
                 self._populate_from_data_sheet(raw)
                 self.results_df = self.df.copy()
 
@@ -579,7 +579,7 @@ def detect_migrating(
     inside_ids = np.asarray(inside_ids, dtype=int)
     n = len(inside_ids)
     if n < 6:
-        return [], np.full(n, np.nan)
+        return []
 
     icm = data_xyz[inside_ids]
 
