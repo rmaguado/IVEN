@@ -575,7 +575,7 @@ def detect_migrating(
     inside_ids: np.ndarray,
     z_cut: float = 3.5,
     k: int = 5,
-):
+) -> List[int]:
     inside_ids = np.asarray(inside_ids, dtype=int)
     n = len(inside_ids)
     if n < 6:
