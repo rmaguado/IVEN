@@ -50,6 +50,7 @@ from PyQt6.QtWidgets import (
     QCheckBox,
     QTextEdit,
     QPushButton,
+    QInputDialog,
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QSize
 from PyQt6.QtGui import QFont, QIcon, QAction, QColor, QGuiApplication
@@ -651,18 +652,28 @@ def detect_migrating(
 
     icm = data_xyz[inside_ids]
 
+    try:
+        hull = ConvexHull(icm)
+        hull_local_idx = np.unique(hull.vertices)
+    except Exception:
+        return []
+
     D = cdist(icm, icm)
     np.fill_diagonal(D, np.inf)
     kk = min(k, n - 1)
     D.sort(axis=1)
     local = D[:, :kk].mean(axis=1)
 
-    med = np.median(local)
-    mad = np.median(np.abs(local - med))
-    scale = 1.4826 * mad if mad > 0 else (local.std() or 1.0)
+    hull_local = local[hull_local_idx]
+    med = np.median(hull_local)
+    mad = np.median(np.abs(hull_local - med))
+    scale = 1.4826 * mad if mad > 0 else (hull_local.std() or 1.0)
     score = (local - med) / scale
 
-    migrating = [int(inside_ids[i]) for i in np.where(score > z_cut)[0]]
+    hull_mask = np.zeros(n, dtype=bool)
+    hull_mask[hull_local_idx] = True
+
+    migrating = [int(inside_ids[i]) for i in np.where((score > z_cut) & hull_mask)[0]]
     return migrating
 
 
@@ -1937,6 +1948,7 @@ class IvenMainWindow(QMainWindow):
         self.setMinimumSize(1280, 850)
         self.session = Session()
         self.output_dir = None
+        self.input_stem = None
         self._picking_nbr_toggle = False
         self._nbr_toggle_first = None
         self._build_ui()
@@ -2522,7 +2534,8 @@ class IvenMainWindow(QMainWindow):
             self.colour_combo.addItem(h)
         self.colour_combo.blockSignals(False)
 
-        self.output_dir = Path(path).parent / f"{Path(path).stem}"
+        self.output_dir = Path(path).parent
+        self.input_stem = Path(path).stem
         self.show_message(str(self.output_dir))
 
         # Reset sidebar & toolbar state for fresh data
@@ -3109,21 +3122,30 @@ class IvenMainWindow(QMainWindow):
             QMessageBox.warning(self, "Save", "Run inside / outside detection first.")
             return
 
-        # Always prompt for save location
+        # Always prompt for a parent directory to save into
         default_dir = str(self.output_dir) if self.output_dir else ""
         d = QFileDialog.getExistingDirectory(self, "Choose output folder", default_dir)
         if not d:
             return
-        self.output_dir = Path(d)
+        base_dir = Path(d)
 
-        self.output_dir.mkdir(parents=True, exist_ok=True)
-        fname = self.output_dir / f"output_{self.output_dir.stem}.xlsx"
-
-        if os.path.exists(fname):
-            QMessageBox.critical(
-                self, "Save Error", "Output file already exists. Skipping save."
-            )
+        default_name = self.input_stem or "results"
+        folder_name, ok = QInputDialog.getText(
+            self, "Output Folder Name", "Folder name:", text=default_name
+        )
+        if not ok:
             return
+        folder_name = folder_name.strip() or default_name
+
+        target_dir = base_dir / folder_name
+        counter = 1
+        while target_dir.exists():
+            target_dir = base_dir / f"{folder_name}_{counter}"
+            counter += 1
+        target_dir.mkdir(parents=True)
+
+        self.output_dir = target_dir
+        fname = target_dir / f"output_{target_dir.name}.xlsx"
 
         if len(s.nbr_matrix2) == 0:
             s.nbr_matrix1 = nbr_matrix(s)
