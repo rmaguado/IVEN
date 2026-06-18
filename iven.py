@@ -2003,6 +2003,15 @@ class IvenMainWindow(QMainWindow):
         self.btn_save.setShortcut("Ctrl+S")
         toolbar.addAction(self.btn_save)
 
+        self.btn_save_screenshot = QAction(
+            QIcon(abspath("assets/screenshot.png")), "", self
+        )
+        self.btn_save_screenshot.setToolTip(
+            "Save a screenshot of the view [Ctrl+Shift+S]"
+        )
+        self.btn_save_screenshot.setShortcut("Ctrl+Shift+S")
+        toolbar.addAction(self.btn_save_screenshot)
+
         toolbar.addSeparator()
 
         # Hull mesh toggle
@@ -2448,6 +2457,7 @@ class IvenMainWindow(QMainWindow):
 
         self.btn_open_file.triggered.connect(self._open_file)
         self.btn_save.triggered.connect(self._save_results)
+        self.btn_save_screenshot.triggered.connect(self._save_screenshot)
 
         self.btn_toggle_legend.toggled.connect(self._toggle_legend)
         self.btn_colour_settings.triggered.connect(self._show_channel_colour_dialog)
@@ -3160,13 +3170,27 @@ class IvenMainWindow(QMainWindow):
 
         s.save_checkpoint(fname)
 
-        img_path = self.output_dir / f"figure.png"
-        self.canvas.fig.savefig(str(img_path), dpi=300)
-
         self.show_message(f"Saved to {fname}")
-        QMessageBox.information(
-            self, "Saved", f"Results saved to:\n{fname}\n\nImage saved to:\n{img_path}"
+        QMessageBox.information(self, "Saved", f"Results saved to:\n{fname}")
+
+    def _save_screenshot(self):
+        """Prompt the user for a file location/name and save a screenshot of the current view."""
+        default_dir = str(self.output_dir) if self.output_dir else ""
+        default_path = (
+            str(Path(default_dir) / "figure.png") if default_dir else "figure.png"
         )
+
+        fname, _ = QFileDialog.getSaveFileName(
+            self,
+            "Save Screenshot",
+            default_path,
+            "PNG Image (*.png);;JPEG Image (*.jpg *.jpeg);;All Files (*)",
+        )
+        if not fname:
+            return
+
+        self.canvas.fig.savefig(fname, dpi=300)
+        self.show_message(f"Screenshot saved to {fname}")
 
 
 def main():
