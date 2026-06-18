@@ -50,7 +50,6 @@ from PyQt6.QtWidgets import (
     QCheckBox,
     QTextEdit,
     QPushButton,
-    QInputDialog,
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QSize
 from PyQt6.QtGui import QFont, QIcon, QAction, QColor, QGuiApplication
@@ -1977,6 +1976,97 @@ class CavitySettingsDialog(QDialog):
         }
 
 
+class FolderNameDialog(QDialog):
+    """Small dialog prompting for an output folder name.
+
+    Replaces QInputDialog.getText, which renders with oversized native
+    buttons that don't match the rest of the app's compact dialog style.
+    """
+
+    def __init__(self, default_name: str = "", parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Output Folder Name")
+        self.setFixedWidth(360)
+
+        layout = QVBoxLayout(self)
+        layout.setSpacing(10)
+        layout.setContentsMargins(20, 18, 20, 16)
+
+        lbl = QLabel("Folder name")
+        lbl.setStyleSheet("font-weight: 600; font-size: 12px; color: #1a1a1a;")
+        layout.addWidget(lbl)
+
+        self.name_edit = QLineEdit(default_name)
+        self.name_edit.setStyleSheet("""
+            QLineEdit {
+                padding: 6px 8px;
+                font-size: 12px;
+                border: 1px solid #cccccc;
+                border-radius: 6px;
+                background: #ffffff;
+            }
+            QLineEdit:focus {
+                border: 1px solid #3b82f6;
+            }
+            """)
+        self.name_edit.selectAll()
+        layout.addWidget(self.name_edit)
+
+        layout.addSpacing(4)
+
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(8)
+        btn_row.addStretch()
+
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.setFixedSize(84, 30)
+        cancel_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        cancel_btn.setStyleSheet("""
+            QPushButton {
+                background: #f0f0f0;
+                border: 1px solid #cccccc;
+                border-radius: 6px;
+                font-size: 12px;
+                color: #1a1a1a;
+            }
+            QPushButton:hover { background: #e4e4e4; }
+            QPushButton:pressed { background: #d8d8d8; }
+            """)
+        cancel_btn.clicked.connect(self.reject)
+
+        ok_btn = QPushButton("OK")
+        ok_btn.setFixedSize(84, 30)
+        ok_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        ok_btn.setDefault(True)
+        ok_btn.setStyleSheet("""
+            QPushButton {
+                background: #3b82f6;
+                border: 1px solid #2563eb;
+                border-radius: 6px;
+                font-size: 12px;
+                font-weight: 600;
+                color: #ffffff;
+            }
+            QPushButton:hover { background: #2f74e0; }
+            QPushButton:pressed { background: #2563eb; }
+            """)
+        ok_btn.clicked.connect(self.accept)
+
+        btn_row.addWidget(cancel_btn)
+        btn_row.addWidget(ok_btn)
+        layout.addLayout(btn_row)
+
+    def folder_name(self) -> str:
+        return self.name_edit.text().strip()
+
+    @staticmethod
+    def get_folder_name(parent, default_name: str = ""):
+        """Drop-in replacement for QInputDialog.getText(...) returning (text, ok)."""
+        dlg = FolderNameDialog(default_name=default_name, parent=parent)
+        ok = dlg.exec() == QDialog.DialogCode.Accepted
+        return dlg.folder_name(), ok
+
+
 class IvenMainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -3180,8 +3270,8 @@ class IvenMainWindow(QMainWindow):
         base_dir = Path(d)
 
         default_name = self.input_stem or "results"
-        folder_name, ok = QInputDialog.getText(
-            self, "Output Folder Name", "Folder name:", text=default_name
+        folder_name, ok = FolderNameDialog.get_folder_name(
+            self, default_name=default_name
         )
         if not ok:
             return
