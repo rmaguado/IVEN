@@ -525,6 +525,10 @@ class Session:
     angle_threshold: float = 30
     use_pe_centroid: bool = False
 
+    # Migration detection params
+    migration_k: int = 5
+    migration_z_cut: float = 3.5
+
     # Threshold params
     thresh_method: str = "Automatic (cell position dependent)"
     thresh_k: float = 0.5
@@ -1890,14 +1894,44 @@ class CavitySettingsDialog(QDialog):
         self,
         current_angle,
         use_pe_centroid,
+        current_k=5,
+        current_z_cut=3.5,
         parent=None,
     ):
         super().__init__(parent)
-        self.setWindowTitle("Migration & Cavity Settings")
+        self.setWindowTitle("Migration & Cavity Detection Settings")
         self.setMinimumWidth(440)
         layout = QVBoxLayout(self)
         layout.setSpacing(12)
         layout.setContentsMargins(16, 16, 16, 16)
+
+        hdr1 = QLabel("Migration Detection")
+        hdr1.setStyleSheet("font-weight: 700; font-size: 12px; color: #1a1a1a;")
+        layout.addWidget(hdr1)
+
+        k_row = QHBoxLayout()
+        k_row.setSpacing(8)
+        k_lbl = QLabel("Number of neighbours (k)")
+        k_lbl.setStyleSheet("font-size: 11px; color: #555;")
+        self.k_edit = QLineEdit(str(current_k))
+        self.k_edit.setFixedWidth(80)
+        k_row.addWidget(k_lbl)
+        k_row.addStretch()
+        k_row.addWidget(self.k_edit)
+        layout.addLayout(k_row)
+
+        z_cut_row = QHBoxLayout()
+        z_cut_row.setSpacing(8)
+        z_cut_lbl = QLabel("Outlier score threshold")
+        z_cut_lbl.setStyleSheet("font-size: 11px; color: #555;")
+        self.z_cut_edit = QLineEdit(str(current_z_cut))
+        self.z_cut_edit.setFixedWidth(80)
+        z_cut_row.addWidget(z_cut_lbl)
+        z_cut_row.addStretch()
+        z_cut_row.addWidget(self.z_cut_edit)
+        layout.addLayout(z_cut_row)
+
+        layout.addSpacing(12)
 
         hdr2 = QLabel("Cavity Detection — Exclusion Angle")
         hdr2.setStyleSheet("font-weight: 700; font-size: 12px; color: #1a1a1a;")
@@ -1938,6 +1972,8 @@ class CavitySettingsDialog(QDialog):
         return {
             "angle_threshold": self.slider.value(),
             "use_pe_centroid": self.checkbox.isChecked(),
+            "migration_k": self.k_edit.text(),
+            "migration_z_cut": self.z_cut_edit.text(),
         }
 
 
@@ -2666,7 +2702,9 @@ class IvenMainWindow(QMainWindow):
                 self, "Migration", "Run inside / outside detection first."
             )
             return
-        migrating = detect_migrating(s.xyz, s.inside_ids2)
+        migrating = detect_migrating(
+            s.xyz, s.inside_ids2, z_cut=s.migration_z_cut, k=s.migration_k
+        )
         s.icm_outlier_ids = migrating
         s.icm_outlier_bool = np.zeros(s.num_cells, dtype=np.int64)
         if len(s.icm_outlier_ids) > 0:
@@ -2740,6 +2778,8 @@ class IvenMainWindow(QMainWindow):
         dlg = CavitySettingsDialog(
             current_angle=self.session.angle_threshold,
             use_pe_centroid=self.session.use_pe_centroid,
+            current_k=self.session.migration_k,
+            current_z_cut=self.session.migration_z_cut,
             parent=self,
         )
         if dlg.exec():
@@ -2752,6 +2792,16 @@ class IvenMainWindow(QMainWindow):
                 self.session.angle_threshold = 30
 
             self.session.use_pe_centroid = vals["use_pe_centroid"]
+
+            try:
+                self.session.migration_k = int(vals["migration_k"])
+            except ValueError:
+                self.session.migration_k = 5
+
+            try:
+                self.session.migration_z_cut = float(vals["migration_z_cut"])
+            except ValueError:
+                self.session.migration_z_cut = 3.5
 
     def _auto_detect_neighbours(self):
         s = self.session
