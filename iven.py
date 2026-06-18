@@ -1,5 +1,6 @@
 import os
 import sys
+import traceback
 import numpy as np
 import pandas as pd
 from dataclasses import dataclass, field
@@ -47,9 +48,11 @@ from PyQt6.QtWidgets import (
     QColorDialog,
     QScrollArea,
     QCheckBox,
+    QTextEdit,
+    QPushButton,
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QSize
-from PyQt6.QtGui import QFont, QIcon, QAction, QColor
+from PyQt6.QtGui import QFont, QIcon, QAction, QColor, QGuiApplication
 
 if getattr(sys, "frozen", False):
     base_path = sys._MEIPASS  # type: ignore
@@ -419,6 +422,64 @@ class ChannelColourDialog(QDialog):
         return dict(self._category_colours)
 
 
+class ErrorDialog(QDialog):
+    def __init__(
+        self,
+        title: str,
+        message: str,
+        details: str = "",
+        parent=None,
+    ):
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self.setMinimumSize(560, 400)
+        self._details = details
+
+        layout = QVBoxLayout(self)
+        layout.setSpacing(10)
+        layout.setContentsMargins(16, 16, 16, 16)
+
+        msg_label = QLabel(message)
+        msg_label.setWordWrap(True)
+        msg_label.setStyleSheet("font-weight: 600; font-size: 12px;")
+        layout.addWidget(msg_label)
+
+        if details:
+            self._text = QTextEdit()
+            self._text.setReadOnly(True)
+            self._text.setPlainText(details)
+            self._text.setStyleSheet(
+                "font-family: Consolas, 'Courier New', monospace; font-size: 10px;"
+            )
+            layout.addWidget(self._text, stretch=1)
+
+        button_row = QHBoxLayout()
+        button_row.addStretch()
+
+        if details:
+            self._copy_btn = QPushButton("Copy to Clipboard")
+            self._copy_btn.clicked.connect(self._copy_details)
+            button_row.addWidget(self._copy_btn)
+
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(self.accept)
+        close_btn.setDefault(True)
+        button_row.addWidget(close_btn)
+
+        layout.addLayout(button_row)
+
+    def _copy_details(self):
+        QGuiApplication.clipboard().setText(self._details)  # type: ignore
+
+    @staticmethod
+    def show_exception(parent, title: str, message: str, exc: Exception):
+        """Convenience method: build the traceback string from an exception
+        and display it in an ErrorDialog."""
+        details = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+        dlg = ErrorDialog(title, message, details, parent=parent)
+        dlg.exec()
+
+
 @dataclass
 class Session:
     df: pd.DataFrame = field(default_factory=pd.DataFrame)
@@ -475,37 +536,44 @@ class Session:
     extra_sheets: dict = field(default_factory=dict)
 
     def load(self, filepath: Path) -> None:
+        filepath = Path(filepath)
+        if not filepath.exists():
+            raise FileNotFoundError(f"File not found: {filepath}")
+
         fp = str(filepath).lower()
-        if fp.endswith((".xlsx", ".xls")):
-            xl = pd.ExcelFile(filepath)
-            sheet_names = xl.sheet_names
+        try:
+            if fp.endswith((".xlsx", ".xls")):
+                xl = pd.ExcelFile(filepath)
+                sheet_names = xl.sheet_names
 
-            self.extra_sheets = {
-                name: xl.parse(name, header=0)  # type: ignore
-                for name in sheet_names
-                if name not in {"Data", "Results", "Distances", "Migration"}
-            }
+                self.extra_sheets = {
+                    name: xl.parse(name, header=0)  # type: ignore
+                    for name in sheet_names
+                    if name not in {"Data", "Results", "Distances", "Migration"}
+                }
 
-            if "Results" in sheet_names and "Distances" in sheet_names:
-                results_sheet = xl.parse("Results", header=0)  # type: ignore
-                dist_sheet = xl.parse("Distances", header=0)  # type: ignore
-                data_sheet = xl.parse("Data", header=0)  # type: ignore
-                self._populate_from_data_sheet(data_sheet)
-                self.results_df = results_sheet.copy()
-                self.dist = dist_sheet.copy()
-                self.is_checkpoint = True
-                self._restore_checkpoint()
-            else:
-                raw = xl.parse(sheet_names[0], header=0)  # type: ignore
+                if "Results" in sheet_names and "Distances" in sheet_names:
+                    results_sheet = xl.parse("Results", header=0)  # type: ignore
+                    dist_sheet = xl.parse("Distances", header=0)  # type: ignore
+                    data_sheet = xl.parse("Data", header=0)  # type: ignore
+                    self._populate_from_data_sheet(data_sheet)
+                    self.results_df = results_sheet.copy()
+                    self.dist = dist_sheet.copy()
+                    self.is_checkpoint = True
+                    self._restore_checkpoint()
+                else:
+                    raw = xl.parse(sheet_names[0], header=0)  # type: ignore
+                    self._populate_from_data_sheet(raw)
+                    self.results_df = self.df.copy()
+
+            elif fp.endswith(".csv"):
+                raw = pd.read_csv(filepath)
                 self._populate_from_data_sheet(raw)
                 self.results_df = self.df.copy()
-
-        elif fp.endswith(".csv"):
-            raw = pd.read_csv(filepath)
-            self._populate_from_data_sheet(raw)
-            self.results_df = self.df.copy()
-        else:
-            raise ValueError(f"Unsupported file type: {filepath}")
+            else:
+                raise ValueError(f"Unsupported file type: {filepath}")
+        except Exception as e:
+            raise RuntimeError(f"Failed to load '{filepath.name}': {e}") from e
 
     def _populate_from_data_sheet(self, df: pd.DataFrame) -> None:
         original_cols = [
@@ -1876,7 +1944,10 @@ class IvenMainWindow(QMainWindow):
         try:
             self._open_file()
         except Exception as e:
-            QMessageBox.critical(self, "Load error", str(e))
+            ErrorDialog.show_exception(
+                self, "Load Error", f"Failed to load file:\n{e}", e
+            )
+            self.setWindowTitle("IVEN")
 
     def _build_ui(self):
         central = QWidget()
@@ -2419,7 +2490,12 @@ class IvenMainWindow(QMainWindow):
         try:
             self.session.load(Path(path))
         except Exception as e:
-            QMessageBox.critical(self, "Load error", str(e))
+            ErrorDialog.show_exception(
+                self,
+                "Load Error",
+                f"Failed to load '{Path(path).name}':\n{e}",
+                e,
+            )
             return
 
         self.setWindowTitle(f"{Path(path).name}")
