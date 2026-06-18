@@ -3,7 +3,7 @@ import sys
 import numpy as np
 import pandas as pd
 from dataclasses import dataclass, field
-from typing import List, Tuple, Dict, Optional
+from typing import List, Tuple, Dict
 from pathlib import Path
 from itertools import combinations
 
@@ -450,10 +450,9 @@ class Session:
     cav_adj_ids: np.ndarray = field(default_factory=lambda: np.array([]))
     cav_adj_bool: np.ndarray = field(default_factory=lambda: np.array([]))
 
-    # ICM outlier exclusion
+    # ICM migration detection
     icm_outlier_ids: list = field(default_factory=list)
     icm_outlier_bool: np.ndarray = field(default_factory=lambda: np.array([]))
-    icm_outlier_std: float = 1.7  # std threshold for auto outlier detection
     icm_outlier_faces: List = field(default_factory=list)
 
     mean_cav_icm_distance: float = 0.0
@@ -571,65 +570,32 @@ def classify_outside(pts, n):
     return outside_bool, outside_ids
 
 
-def detect_icm_outliers_numneighbours(
+def detect_migrating(
+    data_xyz: np.ndarray,
     inside_ids: np.ndarray,
-    nbr_matrix,
+    z_cut: float = 3.5,
+    k: int = 5,
 ):
-    if len(inside_ids) < 4:
-        return []
+    inside_ids = np.asarray(inside_ids, dtype=int)
+    n = len(inside_ids)
+    if n < 6:
+        return [], np.full(n, np.nan)
 
-    num_neighbours = {}
+    icm = data_xyz[inside_ids]
 
-    cell1_ids, cell2_ids = np.where(np.triu(nbr_matrix, k=1) == 1)
+    D = cdist(icm, icm)
+    np.fill_diagonal(D, np.inf)
+    kk = min(k, n - 1)
+    D.sort(axis=1)
+    local = D[:, :kk].mean(axis=1)
 
-    for id1, id2 in zip(cell1_ids, cell2_ids):
-        if id1 in inside_ids and id2 in inside_ids:
-            if id1 in num_neighbours:
-                num_neighbours[id1] += 1
-            else:
-                num_neighbours[id1] = 1
+    med = np.median(local)
+    mad = np.median(np.abs(local - med))
+    scale = 1.4826 * mad if mad > 0 else (local.std() or 1.0)
+    score = (local - med) / scale
 
-            if id2 in num_neighbours:
-                num_neighbours[id2] += 1
-            else:
-                num_neighbours[id2] = 1
-
-    more_than_two = [
-        int(ins_id) for ins_id, num_nbr in num_neighbours.items() if num_nbr >= 2
-    ]
-    outliers = [ins_id for ins_id in inside_ids if ins_id not in more_than_two]
-    return outliers
-
-
-def detect_icm_outliers(data_xyz: np.ndarray, inside_ids: np.ndarray, std_threshold):
-    """Detect ICM cells that are migrating away from the main ICM cluster.
-
-    Uses distance from the ICM centroid: cells further than
-    ``std_threshold`` standard-deviations from the mean distance are
-    flagged as outliers.
-
-    Returns
-    -------
-    outlier_global_ids : list[int]
-        Global indices of outlier ICM cells.
-    """
-    if len(inside_ids) < 4:
-        return []
-    icm_pts = data_xyz[inside_ids]
-
-    n_icm = len(icm_pts)
-
-    dists = cdist(icm_pts, icm_pts)  # (n_icm, n_icm)
-    dists += np.eye(n_icm, n_icm) * 1e8
-    nearest_dist = dists.min(axis=1)
-
-    median_dist = np.median(nearest_dist)
-
-    threshold = median_dist * std_threshold
-
-    outliers_bool = nearest_dist > threshold
-
-    return [int(inside_ids[i]) for i in np.where(outliers_bool)[0]]
+    migrating = [int(inside_ids[i]) for i in np.where(score > z_cut)[0]]
+    return migrating
 
 
 def detect_cavity_adjacent_threshold(
@@ -1839,35 +1805,22 @@ class ThresholdDialog(QDialog):
 
 
 class CavitySettingsDialog(QDialog):
-    """Dialog for configuring cavity detection settings (ICM outlier exclusion)."""
+    """Dialog for configuring migration detection and cavity detection settings."""
 
     def __init__(
         self,
-        outlier_std,
         current_angle,
         use_pe_centroid,
         parent=None,
     ):
         super().__init__(parent)
-        self.setWindowTitle("Cavity Detection Settings")
-        self.setMinimumWidth(420)
+        self.setWindowTitle("Migration & Cavity Settings")
+        self.setMinimumWidth(440)
         layout = QVBoxLayout(self)
         layout.setSpacing(12)
         layout.setContentsMargins(16, 16, 16, 16)
 
-        hdr1 = QLabel("ICM Outlier Exclusion")
-        hdr1.setStyleSheet("font-weight: 700; font-size: 12px; color: #1a1a1a;")
-        layout.addWidget(hdr1)
-
-        row_std = QHBoxLayout()
-        row_std.addWidget(QLabel("σ threshold:"))
-        self._outlier_std_edit = QLineEdit(f"{outlier_std:.1f}")
-        self._outlier_std_edit.setFixedWidth(60)
-        row_std.addWidget(self._outlier_std_edit)
-        row_std.addStretch()
-        layout.addLayout(row_std)
-
-        hdr2 = QLabel("Exclusion Angle")
+        hdr2 = QLabel("Cavity Detection — Exclusion Angle")
         hdr2.setStyleSheet("font-weight: 700; font-size: 12px; color: #1a1a1a;")
         layout.addWidget(hdr2)
 
@@ -1903,12 +1856,7 @@ class CavitySettingsDialog(QDialog):
         self.value_label.setText(str(val) + "°")
 
     def get_values(self) -> dict:
-        try:
-            ostd = float(self._outlier_std_edit.text())
-        except ValueError:
-            ostd = 1.7
         return {
-            "outlier_std": max(0.0, ostd),
             "angle_threshold": self.slider.value(),
             "use_pe_centroid": self.checkbox.isChecked(),
         }
@@ -1934,7 +1882,7 @@ class IvenMainWindow(QMainWindow):
         central = QWidget()
         self.setCentralWidget(central)
 
-        # Top toolbar — icon-only, text appears on hover via tooltips
+        # Top toolbar
         toolbar = QToolBar("Main Toolbar")
         toolbar.setMovable(False)
         toolbar.setIconSize(QSize(20, 20))
@@ -2089,7 +2037,7 @@ class IvenMainWindow(QMainWindow):
 
         self.btn_cavity_settings = QAction(QIcon(abspath("assets/alpha.png")), "", self)
         self.btn_cavity_settings.setToolTip(
-            "Cavity detection settings (outlier exclusion) [Ctrl+A]"
+            "Migration & cavity detection settings [Ctrl+A]"
         )
         self.btn_cavity_settings.setShortcut("Ctrl+A")
         toolbar.addAction(self.btn_cavity_settings)
@@ -2488,10 +2436,10 @@ class IvenMainWindow(QMainWindow):
             self.colour_combo.addItem(h)
         self.colour_combo.blockSignals(False)
 
-        self.output_dir = Path(path).parent / f"IVEN2_{Path(path).stem}"
+        self.output_dir = Path(path).parent / f"{Path(path).stem}"
         self.show_message(str(self.output_dir))
 
-        # ── Reset sidebar & toolbar state for fresh data ──────────
+        # Reset sidebar & toolbar state for fresh data
         # Uncheck all manual/toggle modes
         self.btn_manual_outside.setChecked(False)
         self.btn_manual_cavity.setChecked(False)
@@ -2614,12 +2562,16 @@ class IvenMainWindow(QMainWindow):
 
     def _auto_detect_outlier(self):
         s = self.session
-        auto_outliers = detect_icm_outliers(
-            s.xyz, s.inside_ids2, std_threshold=s.icm_outlier_std
-        )
-        s.icm_outlier_ids = auto_outliers
+        if len(s.outside_bool2) == 0:
+            QMessageBox.warning(
+                self, "Migration", "Run inside / outside detection first."
+            )
+            return
+        migrating = detect_migrating(s.xyz, s.inside_ids2)
+        s.icm_outlier_ids = migrating
         s.icm_outlier_bool = np.zeros(s.num_cells, dtype=np.int64)
-        s.icm_outlier_bool[s.icm_outlier_ids] = 1
+        if len(s.icm_outlier_ids) > 0:
+            s.icm_outlier_bool[s.icm_outlier_ids] = 1
 
     def _auto_detect_cavity(self):
         s = self.session
@@ -2687,14 +2639,12 @@ class IvenMainWindow(QMainWindow):
 
     def _show_cavity_settings_dialog(self):
         dlg = CavitySettingsDialog(
-            outlier_std=self.session.icm_outlier_std,
             current_angle=self.session.angle_threshold,
             use_pe_centroid=self.session.use_pe_centroid,
             parent=self,
         )
         if dlg.exec():
             vals = dlg.get_values()
-            self.session.icm_outlier_std = vals["outlier_std"]
 
             angle_threshold = vals["angle_threshold"]
             try:
@@ -2703,9 +2653,6 @@ class IvenMainWindow(QMainWindow):
                 self.session.angle_threshold = 30
 
             self.session.use_pe_centroid = vals["use_pe_centroid"]
-
-            self.show_message(rf"ICM Migration σ={vals['outlier_std']:.1f}")
-            # self._auto_detect_cavity()
 
     def _auto_detect_neighbours(self):
         s = self.session
@@ -3065,56 +3012,6 @@ class IvenMainWindow(QMainWindow):
             for k in labels_keys:
                 colour_dict[k] = category_colours[k]
 
-            self._apply_colour_mode()
-
-    def _show_fixed_colour_dialog_v1(self, title, labels_keys, colour_dict, mode_key):
-        """Open a simple colour picker for fixed-mode (inside / outside or cavity) colours."""
-        dlg = QDialog(self)
-        dlg.setWindowTitle(f"Colour Settings: {title}")
-        dlg.setMinimumWidth(320)
-        layout = QVBoxLayout(dlg)
-        layout.setSpacing(10)
-        layout.setContentsMargins(16, 16, 16, 16)
-
-        hdr = QLabel(f"Colour settings for '{title}':")
-        hdr.setStyleSheet("font-weight: 600; font-size: 12px; color: #1a1a1a;")
-        layout.addWidget(hdr)
-
-        swatches = {}
-        for label, key in labels_keys:
-            row = QHBoxLayout()
-            row.setSpacing(8)
-            sw = ClickableSwatch(colour_dict[key], 16)
-            lbl = QLabel(label)
-            lbl.setStyleSheet("font-size: 11px; color: #333;")
-
-            def make_picker(k, s):
-                def pick():
-                    c = QColorDialog.getColor(
-                        QColor(colour_dict[k]), dlg, f"Colour for '{label}'"
-                    )
-                    if c.isValid():
-                        colour_dict[k] = c.name()
-                        s.set_colour(c.name())
-
-                return pick
-
-            sw.clicked.connect(make_picker(key, sw))
-            swatches[key] = sw
-            row.addWidget(sw)
-            row.addWidget(lbl)
-            row.addStretch()
-            layout.addLayout(row)
-
-        buttons = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
-        )
-        buttons.accepted.connect(dlg.accept)
-        buttons.rejected.connect(dlg.reject)
-        layout.addWidget(buttons)
-
-        if dlg.exec():
-            # colour_dict was mutated in place via the closures; just reapply
             self._apply_colour_mode()
 
     def _save_results(self):
