@@ -526,7 +526,7 @@ class Session:
 
     # Migration detection params
     migration_k: int = 5
-    migration_z_cut: float = 3.5
+    gap_multiplier: float = 2.0
 
     # Threshold params
     thresh_method: str = "Automatic (cell position dependent)"
@@ -645,7 +645,7 @@ def classify_outside(pts, n):
 def detect_migrating(
     data_xyz: np.ndarray,
     inside_ids: np.ndarray,
-    z_cut: float = 3.5,
+    gap_multiplier: float,
     k: int = 5,
 ) -> List[int]:
     inside_ids = np.asarray(inside_ids, dtype=int)
@@ -667,67 +667,19 @@ def detect_migrating(
     D.sort(axis=1)
     local = D[:, :kk].mean(axis=1)
 
-    hull_local = local[hull_local_idx]
-    med = np.median(hull_local)
-    mad = np.median(np.abs(hull_local - med))
-    scale = 1.4826 * mad if mad > 0 else (hull_local.std() or 1.0)
-    score = (local - med) / scale
-
     hull_mask = np.zeros(n, dtype=bool)
     hull_mask[hull_local_idx] = True
 
-    migrating = [int(inside_ids[i]) for i in np.where((score > z_cut) & hull_mask)[0]]
+    hull_local = local[hull_local_idx]
+    d_typical = np.median(hull_local)  # typical surface-cell spacing, same population
+
+    threshold_distance = gap_multiplier * d_typical
+
+    migrating = [
+        int(inside_ids[i])
+        for i in np.where((local > threshold_distance) & hull_mask)[0]
+    ]
     return migrating
-
-
-def detect_cavity_adjacent_threshold(
-    data_xyz,
-    inside_ids: List[int],
-    outside_ids: List[int],
-    outlier_ids: List[int],
-    threshold: float = 0.5,
-) -> List[int]:
-    filtered_inside_ids = [i for i in inside_ids if i not in outlier_ids]
-
-    if len(filtered_inside_ids) == 0 or len(outside_ids) == 0:
-        return []
-
-    icm_pts = data_xyz[filtered_inside_ids]
-    te_pts = data_xyz[outside_ids]
-
-    te_centroid = te_pts.mean(axis=0)
-    icm_centroid = icm_pts.mean(axis=0)
-
-    # Compute smallest principal component of icm_pts
-    icm_centered = icm_pts - icm_centroid
-    cov = np.cov(icm_centered, rowvar=False)
-    eigvals, eigvecs = np.linalg.eigh(cov)
-    # smallest principal component
-    vhat = eigvecs[:, np.argmin(eigvals)]
-
-    # ensure vhat points roughly toward te_centroid (optional)
-    if np.dot(vhat, te_centroid - icm_centroid) < 0:
-        vhat = -vhat
-
-    # project points onto direction vector
-    icm_proj = (icm_pts - icm_centroid) @ vhat
-    te_proj = (te_pts - icm_centroid) @ vhat
-
-    # span of ICM projections
-    proj_min = icm_proj.min()
-    proj_max = icm_proj.max()
-    span = proj_max - proj_min
-    if span == 0:
-        return []
-
-    tlim = proj_min + threshold * span
-
-    # select cavity-adjacent points
-    icm_cavity_ids = [idx for idx, p in zip(filtered_inside_ids, icm_proj) if p > tlim]
-    pe_cavity_ids = [idx for idx, p in zip(outside_ids, te_proj) if p > tlim]
-
-    cavity_ids = icm_cavity_ids + pe_cavity_ids
-    return cavity_ids
 
 
 def tangent_frame(w):
@@ -1894,7 +1846,7 @@ class CavitySettingsDialog(QDialog):
         current_angle,
         use_pe_centroid,
         current_k=5,
-        current_z_cut=3.5,
+        current_gap_multiplier=3.5,
         parent=None,
     ):
         super().__init__(parent)
@@ -1919,16 +1871,16 @@ class CavitySettingsDialog(QDialog):
         k_row.addWidget(self.k_edit)
         layout.addLayout(k_row)
 
-        z_cut_row = QHBoxLayout()
-        z_cut_row.setSpacing(8)
-        z_cut_lbl = QLabel("Outlier score threshold")
-        z_cut_lbl.setStyleSheet("font-size: 11px; color: #555;")
-        self.z_cut_edit = QLineEdit(str(current_z_cut))
-        self.z_cut_edit.setFixedWidth(80)
-        z_cut_row.addWidget(z_cut_lbl)
-        z_cut_row.addStretch()
-        z_cut_row.addWidget(self.z_cut_edit)
-        layout.addLayout(z_cut_row)
+        mult_row = QHBoxLayout()
+        mult_row.setSpacing(8)
+        mult_lbl = QLabel("Outlier score threshold")
+        mult_lbl.setStyleSheet("font-size: 11px; color: #555;")
+        self.mult_edit = QLineEdit(str(current_gap_multiplier))
+        self.mult_edit.setFixedWidth(80)
+        mult_row.addWidget(mult_lbl)
+        mult_row.addStretch()
+        mult_row.addWidget(self.mult_edit)
+        layout.addLayout(mult_row)
 
         layout.addSpacing(12)
 
@@ -1972,7 +1924,7 @@ class CavitySettingsDialog(QDialog):
             "angle_threshold": self.slider.value(),
             "use_pe_centroid": self.checkbox.isChecked(),
             "migration_k": self.k_edit.text(),
-            "migration_z_cut": self.z_cut_edit.text(),
+            "migration_gap_multiplier": self.mult_edit.text(),
         }
 
 
@@ -2793,7 +2745,7 @@ class IvenMainWindow(QMainWindow):
             )
             return
         migrating = detect_migrating(
-            s.xyz, s.inside_ids2, z_cut=s.migration_z_cut, k=s.migration_k
+            s.xyz, s.inside_ids2, gap_multiplier=s.gap_multiplier, k=s.migration_k
         )
         s.icm_outlier_ids = migrating
         s.icm_outlier_bool = np.zeros(s.num_cells, dtype=np.int64)
@@ -2869,7 +2821,7 @@ class IvenMainWindow(QMainWindow):
             current_angle=self.session.angle_threshold,
             use_pe_centroid=self.session.use_pe_centroid,
             current_k=self.session.migration_k,
-            current_z_cut=self.session.migration_z_cut,
+            current_gap_multiplier=self.session.gap_multiplier,
             parent=self,
         )
         if dlg.exec():
@@ -2889,9 +2841,9 @@ class IvenMainWindow(QMainWindow):
                 self.session.migration_k = 5
 
             try:
-                self.session.migration_z_cut = float(vals["migration_z_cut"])
+                self.session.gap_multiplier = float(vals["gap_multiplier"])
             except ValueError:
-                self.session.migration_z_cut = 3.5
+                self.session.gap_multiplier = 2.0
 
     def _auto_detect_neighbours(self):
         s = self.session
