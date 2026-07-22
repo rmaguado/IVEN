@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from typing import List, Tuple, Dict
 from pathlib import Path
 from itertools import combinations
+from collections import deque
 
 import scipy
 from scipy.spatial import ConvexHull, Delaunay
@@ -526,7 +527,16 @@ class Session:
 
     # Migration detection params
     migration_k: int = 5
-    gap_multiplier: float = 2.0
+    gap_multiplier: float = 1.5
+    migration_spacing: pd.DataFrame = field(default_factory=pd.DataFrame)
+    migration_spacing_summary: pd.DataFrame = field(default_factory=pd.DataFrame)
+
+    cavity_volume: float = 0.0
+    cavity_mesh_faces: list = field(default_factory=list)
+    cavity_volume_used_fallback: bool = False
+    cavity_volume_message: str = ""
+    not_cavity_volume: float = 0.0
+    not_cavity_mesh_faces: list = field(default_factory=list)
 
     # Threshold params
     thresh_method: str = "Automatic (cell position dependent)"
@@ -631,6 +641,17 @@ class Session:
             if hasattr(self, "migration") and not self.migration.empty:
                 self.migration.to_excel(writer, sheet_name="Migration", index=False)
 
+            if hasattr(self, "migration_spacing") and not self.migration_spacing.empty:
+                self.migration_spacing_summary.to_excel(
+                    writer, sheet_name="Spacing", index=False
+                )
+                self.migration_spacing.to_excel(
+                    writer,
+                    sheet_name="Spacing",
+                    index=False,
+                    startrow=len(self.migration_spacing_summary) + 3,
+                )
+
             self.info.to_excel(writer, sheet_name="Info", index=False)
 
 
@@ -642,16 +663,18 @@ def classify_outside(pts, n):
     return outside_bool, outside_ids
 
 
-def detect_migrating(
+def compute_migration_spacing(
     data_xyz: np.ndarray,
     inside_ids: np.ndarray,
     gap_multiplier: float,
     k: int = 5,
-) -> List[int]:
+):
+    """Per-ICM-cell local spacing (mean distance to k nearest ICM neighbours),
+    plus the typical hull spacing and the resulting migration threshold."""
     inside_ids = np.asarray(inside_ids, dtype=int)
     n = len(inside_ids)
     if n < 6:
-        return []
+        return None
 
     icm = data_xyz[inside_ids]
 
@@ -659,7 +682,7 @@ def detect_migrating(
         hull = ConvexHull(icm)
         hull_local_idx = np.unique(hull.vertices)
     except Exception:
-        return []
+        return None
 
     D = cdist(icm, icm)
     np.fill_diagonal(D, np.inf)
@@ -675,11 +698,667 @@ def detect_migrating(
 
     threshold_distance = gap_multiplier * d_typical
 
-    migrating = [
-        int(inside_ids[i])
-        for i in np.where((local > threshold_distance) & hull_mask)[0]
-    ]
+    spacing_df = pd.DataFrame(
+        {
+            "ID": inside_ids,
+            "local_spacing": local,
+            "is_hull_cell": hull_mask,
+            "is_migrating": (local > threshold_distance) & hull_mask,
+        }
+    )
+    return spacing_df, d_typical, threshold_distance
+
+
+def compute_migration_spacing_multi_k(
+    data_xyz: np.ndarray,
+    inside_ids: np.ndarray,
+    gap_multiplier: float,
+    ks=(3, 5, 7, 9, 11),
+):
+    """Per-ICM-cell local spacing computed at several neighbourhood sizes (k),
+    plus the typical hull spacing and migration threshold at each k."""
+    inside_ids = np.asarray(inside_ids, dtype=int)
+    n = len(inside_ids)
+    if n < 6:
+        return None
+
+    icm = data_xyz[inside_ids]
+
+    try:
+        hull = ConvexHull(icm)
+        hull_local_idx = np.unique(hull.vertices)
+    except Exception:
+        return None
+
+    hull_mask = np.zeros(n, dtype=bool)
+    hull_mask[hull_local_idx] = True
+
+    D = cdist(icm, icm)
+    np.fill_diagonal(D, np.inf)
+    D.sort(axis=1)
+
+    spacing_df = pd.DataFrame({"ID": inside_ids, "is_hull_cell": hull_mask})
+    summary = {"k": [], "typical_spacing": [], "threshold_spacing": []}
+
+    for k in ks:
+        kk = min(k, n - 1)
+        local = D[:, :kk].mean(axis=1)
+        d_typical = np.median(local[hull_local_idx])
+        threshold_distance = gap_multiplier * d_typical
+
+        spacing_df[f"local_spacing_k{k}"] = local
+
+        summary["k"].append(k)
+        summary["typical_spacing"].append(d_typical)
+        summary["threshold_spacing"].append(threshold_distance)
+
+    summary_df = pd.DataFrame(summary)
+    return spacing_df, summary_df
+
+
+def detect_migrating(
+    data_xyz: np.ndarray,
+    inside_ids: np.ndarray,
+    gap_multiplier: float,
+    k: int = 5,
+) -> List[int]:
+    result = compute_migration_spacing(data_xyz, inside_ids, gap_multiplier, k)
+    if result is None:
+        return []
+    spacing_df, _, _ = result
+    migrating = spacing_df.loc[spacing_df["is_migrating"], "ID"].astype(int).tolist()
     return migrating
+
+
+class CavityVolumeError(Exception):
+    """Raised when the concave/convex hybrid cavity volume can't be built."""
+
+
+@dataclass
+class IcmCavitySurface:
+    """Concave triangulated surface over the cavity-adjacent ICM points,
+    plus the best-fit plane it was projected through (needed to compute the
+    exact flat-vs-concave volume correction; see _compute_cavity_volume_hybrid)."""
+
+    faces: List[np.ndarray]  # length-3 index arrays, local to icm_cav_ids
+    icm_cav_ids: List[int]
+    pts_3d: np.ndarray  # (N, 3) true positions
+    pts_2d: np.ndarray  # (N, 2) plane-projected positions
+    centroid: np.ndarray
+    u: np.ndarray
+    v: np.ndarray
+    w: np.ndarray  # plane normal
+
+
+def build_icm_cavity_faces(session):
+    """Concave triangulated surface over the cavity-adjacent ICM points.
+
+    Fits a plane to the points (PCA), projects them to 2-D and Delaunay
+    triangulates, so the surface follows the actual point cloud (including
+    any dips/dents) rather than the flat cap a convex hull would produce.
+
+    Returns an IcmCavitySurface, or None if there are too few cavity-
+    adjacent ICM points to triangulate.
+    """
+    s = session
+    if len(s.outside_bool2) == 0 or len(s.cav_adj_bool) == 0:
+        return None
+
+    icm_cav_mask = (s.outside_bool2 == 0) & (s.cav_adj_bool == 1)
+    icm_cav_ids = [
+        int(i) for i in np.where(icm_cav_mask)[0] if i not in s.icm_outlier_ids
+    ]
+    if len(icm_cav_ids) < 3:
+        return None
+
+    pts_3d = s.xyz[icm_cav_ids]
+    centroid = pts_3d.mean(axis=0)
+    centered = pts_3d - centroid
+
+    cov = np.cov(centered, rowvar=False)
+    eigvals, eigvecs = np.linalg.eigh(cov)
+    order = np.argsort(eigvals)[::-1]
+    u = eigvecs[:, order[0]]
+    v = eigvecs[:, order[1]]
+    w = eigvecs[:, order[2]]
+    pts_2d = np.column_stack([centered @ u, centered @ v])
+
+    try:
+        tri = Delaunay(pts_2d)
+    except Exception:
+        return None
+
+    faces = [np.asarray(face) for face in tri.simplices]
+    return IcmCavitySurface(
+        faces=faces,
+        icm_cav_ids=icm_cav_ids,
+        pts_3d=pts_3d,
+        pts_2d=pts_2d,
+        centroid=centroid,
+        u=u,
+        v=v,
+        w=w,
+    )
+
+
+def _signed_tri_volume(apex, a, b, c):
+    return float(np.dot(a - apex, np.cross(b - apex, c - apex)) / 6.0)
+
+
+def _face_edges(face_ids):
+    """The 3 undirected edges of a triangle, as sorted (id1, id2) pairs."""
+    return [tuple(sorted(e)) for e in combinations(face_ids, 2)]
+
+
+def _boundary_edges(face_id_list):
+    """Edges used by exactly one face in a list of (global-id) triangles."""
+    counts: Dict[Tuple[int, int], int] = {}
+    for f in face_id_list:
+        for e in _face_edges(f):
+            counts[e] = counts.get(e, 0) + 1
+    return {e for e, c in counts.items() if c == 1}
+
+
+def _order_boundary_loop(boundary_edges):
+    """Order a patch's boundary edges into one cyclic sequence of vertex
+    ids, suitable for _bridge_loops.
+
+    A patch boundary is usually a single simple loop (every vertex has
+    exactly 2 boundary neighbours), but a patch that pinches into multiple
+    lobes meeting at a shared vertex (e.g. a "figure eight") has some
+    vertex with degree 4, 6, etc. Since every vertex has *even* degree
+    either way (a manifold patch boundary always does), the edge set
+    always has an Eulerian circuit -- one closed walk using every edge
+    exactly once -- found here via Hierholzer's algorithm: walk from an
+    arbitrary vertex until stuck (necessarily back where it started, given
+    every vertex has even degree), then repeatedly splice in a sub-walk
+    from any not-yet-exhausted vertex already on the circuit, at that
+    vertex's exact position, until no edges remain.
+
+    Splicing (rather than naively concatenating independently-discovered
+    cycles) matters: it inserts each extra loop at the precise point where
+    it shares a vertex with the rest of the circuit, which is what keeps
+    the combined sequence's implied edges exactly equal to the original
+    edge set instead of introducing spurious "join" edges.
+    """
+    adjacency: Dict[int, List[int]] = {}
+    for p, q in boundary_edges:
+        adjacency.setdefault(p, []).append(q)
+        adjacency.setdefault(q, []).append(p)
+    if any(len(nbrs) % 2 != 0 or not nbrs for nbrs in adjacency.values()):
+        raise CavityVolumeError("a cavity patch boundary has an odd-degree vertex")
+
+    remaining = {v: list(nbrs) for v, nbrs in adjacency.items()}
+    total_edges = sum(len(nbrs) for nbrs in remaining.values()) // 2
+
+    def walk_from(v):
+        path = [v]
+        cur = v
+        while remaining[cur]:
+            nxt = remaining[cur].pop()
+            remaining[nxt].remove(cur)
+            cur = nxt
+            path.append(cur)
+        return path  # closed walk: path[0] == path[-1] == v
+
+    start = next(iter(adjacency))
+    circuit = walk_from(start)
+    used = len(circuit) - 1
+
+    while used < total_edges:
+        try:
+            splice_pos = next(i for i, v in enumerate(circuit) if remaining[v])
+        except StopIteration:
+            raise CavityVolumeError("a cavity patch boundary decomposition failed")
+        sub = walk_from(circuit[splice_pos])
+        circuit = circuit[:splice_pos] + sub + circuit[splice_pos + 1 :]
+        used += len(sub) - 1
+
+    return circuit[:-1]
+
+
+def _bridge_loops(loop_a, loop_b, pts_2d):
+    """Stitch two ordered, closed 2-D loops (lists of global ids) into a
+    triangulated tube connecting them, via dynamic-programming optimal
+    "loop bridging": among all ways to walk both loops in lock-step
+    (advancing one or the other at each step) back to the start, find the
+    one minimizing the total length of the diagonals used. This always
+    produces exactly len(loop_a) + len(loop_b) triangles with no gaps or
+    overlaps, regardless of how the two loops' radii/points interleave --
+    unlike a spatial Delaunay triangulation of the combined point set,
+    which can easily misfire when the two rims aren't cleanly nested.
+
+    A simpler *greedy* version of this (locally pick whichever diagonal is
+    shorter at each step) can still produce a locally self-crossing (and
+    hence non-orientable) result when the two loops have a tight, closely
+    interleaved region -- e.g. a narrow ICM/TE pinch where a few points on
+    one loop sit closer to points on the OTHER loop than to their own
+    neighbours. Solving for the globally cheapest sequence of diagonals
+    (standard technique for triangulating a strip/ribbon between two
+    contours) is far more robust to exactly that situation, since a locally
+    "tempting" but bad diagonal only gets used if it's actually part of the
+    cheapest overall path.
+
+    pts_2d: dict mapping global id -> 2-D projected coordinates, used to
+    align the loops' starting points and to score candidate diagonals.
+    """
+    na, nb = len(loop_a), len(loop_b)
+    if na < 3 or nb < 3:
+        raise CavityVolumeError("a cavity patch boundary loop is too small to bridge")
+
+    def signed_area(loop):
+        pts = [pts_2d[i] for i in loop]
+        area = 0.0
+        for i in range(len(pts)):
+            x1, y1 = pts[i]
+            x2, y2 = pts[(i + 1) % len(pts)]
+            area += x1 * y2 - x2 * y1
+        return area
+
+    loop_b = list(loop_b)
+    if np.sign(signed_area(loop_a)) != np.sign(signed_area(loop_b)):
+        loop_b = [loop_b[0]] + loop_b[1:][::-1]
+
+    start_b = int(np.argmin([np.linalg.norm(pts_2d[loop_a[0]] - pts_2d[b]) for b in loop_b]))
+    loop_b = loop_b[start_b:] + loop_b[:start_b]
+
+    # a[0..na] and b[0..nb] with a[na]==a[0], b[nb]==b[0] -- the extra entry
+    # closes the cycle so the DP can run start-to-finish over a full lap.
+    a_pts = np.array([pts_2d[loop_a[i % na]] for i in range(na + 1)])
+    b_pts = np.array([pts_2d[loop_b[j % nb]] for j in range(nb + 1)])
+    dist = np.linalg.norm(a_pts[:, None, :] - b_pts[None, :, :], axis=2)
+
+    # cost[i, j] = cheapest total diagonal length to reach a state where
+    # a[i] and b[j] are connected by a diagonal, having consumed loop_a's
+    # edges 0..i-1 and loop_b's edges 0..j-1 along the way.
+    cost = np.full((na + 1, nb + 1), np.inf)
+    from_i = np.zeros((na + 1, nb + 1), dtype=bool)  # True: arrived via advancing loop_a
+    cost[0, 0] = 0.0
+    for i in range(na + 1):
+        for j in range(nb + 1):
+            if i == 0 and j == 0:
+                continue
+            via_a = cost[i - 1, j] if i > 0 else np.inf
+            via_b = cost[i, j - 1] if j > 0 else np.inf
+            if via_a <= via_b:
+                cost[i, j] = via_a + dist[i, j]
+                from_i[i, j] = True
+            else:
+                cost[i, j] = via_b + dist[i, j]
+                from_i[i, j] = False
+
+    # Winding convention: each triangle consumes the "current" diagonal
+    # (a_cur, b_cur) and produces a new one. For consecutive triangles
+    # (whichever mix of advance-a / advance-b steps) to consume each new
+    # diagonal in the opposite direction from how the previous triangle
+    # produced it -- required for a consistently-oriented mesh -- the two
+    # triangle shapes must be (a_cur, a_next, b_cur) and (a_cur, b_next,
+    # b_cur) specifically (note the vertex order in the second one is NOT
+    # (a_cur, b_cur, b_next); that ordering is inconsistent at i/j
+    # transitions, verified by tracing the shared-diagonal direction
+    # through every combination of consecutive step types by hand).
+    a_ids = [loop_a[i % na] for i in range(na + 1)]
+    b_ids = [loop_b[j % nb] for j in range(nb + 1)]
+
+    triangles = []
+    i, j = na, nb
+    while (i, j) != (0, 0):
+        if from_i[i, j]:
+            triangles.append((a_ids[i - 1], a_ids[i], b_ids[j]))
+            i -= 1
+        else:
+            triangles.append((a_ids[i], b_ids[j], b_ids[j - 1]))
+            j -= 1
+    return triangles
+
+
+def _compute_cavity_volume_convex(session):
+    """Volume of the convex hull spanning the ICM cavity surface and the
+    cavity-adjacent TE cells (previous, purely-convex behaviour)."""
+    s = session
+    icm_cav_mask = (s.outside_bool2 == 0) & (s.cav_adj_bool == 1)
+    icm_cav_ids = [
+        int(i) for i in np.where(icm_cav_mask)[0] if i not in s.icm_outlier_ids
+    ]
+    te_cav_mask = (s.outside_bool2 == 1) & (s.cav_adj_bool == 1)
+    te_cav_ids = np.where(te_cav_mask)[0].tolist()
+
+    cavity_ids = icm_cav_ids + te_cav_ids
+    if len(cavity_ids) < 4:
+        return 0.0, []
+
+    pts = s.xyz[cavity_ids]
+    try:
+        hull = ConvexHull(pts)
+    except Exception:
+        return 0.0, []
+
+    mesh_faces = [pts[simplex] for simplex in hull.simplices]
+    return float(hull.volume), mesh_faces
+
+
+def _compute_cavity_volume_hybrid(session):
+    """Volume of the cavity by directly building its closed surface from
+    connectivity that already exists, rather than constructing a new convex
+    hull and hoping some particular set of points lands exactly on it:
+
+    - TE side: the subset of the whole-embryo convex hull's own facets that
+      lie entirely within the cavity-adjacent TE cells (its connectivity is
+      already correct and convex, since it's the real outer shell).
+    - ICM side: the concave Delaunay surface over the cavity-adjacent ICM
+      points (see build_icm_cavity_faces), which follows the true point
+      cloud including any dips.
+    - Bridge: each patch has its own open boundary loop (edges used by only
+      one of its triangles). The two loops are projected onto the ICM's own
+      best-fit plane, combined, and Delaunay-triangulated; only the
+      resulting triangles that touch both loops are kept, forming the
+      connecting wall between them.
+
+    The combined mesh is validated by requiring it to be watertight (every
+    edge shared by exactly two faces) and to have zero net area-weighted
+    normal (a closed, consistently-oriented surface has no net flux) before
+    trusting its volume, computed via the divergence theorem (signed
+    tetrahedra summed from an interior-ish apex). Raises CavityVolumeError
+    if any step fails, so the caller can fall back to a plain convex hull.
+    """
+    s = session
+    if len(s.outside_bool2) == 0 or len(s.cav_adj_bool) == 0:
+        raise CavityVolumeError("no inside/outside or cavity classification yet")
+
+    surf = build_icm_cavity_faces(s)
+    if surf is None:
+        raise CavityVolumeError("fewer than 3 cavity-adjacent ICM points")
+
+    te_cav_mask = (s.outside_bool2 == 1) & (s.cav_adj_bool == 1)
+    te_cav_ids = np.where(te_cav_mask)[0].tolist()
+    if len(te_cav_ids) < 3:
+        raise CavityVolumeError("fewer than 3 cavity-adjacent TE points")
+    te_cav_id_set = set(te_cav_ids)
+    icm_cav_id_set = set(surf.icm_cav_ids)
+
+    if len(s.xyz) < 4:
+        raise CavityVolumeError("not enough cells for the whole-embryo hull")
+    try:
+        hull_global = ConvexHull(s.xyz)
+    except Exception as exc:
+        raise CavityVolumeError(f"whole-embryo convex hull failed ({exc})")
+
+    te_wall_faces_ids = []
+    te_wall_equations = []
+    for simplex, eq in zip(hull_global.simplices, hull_global.equations):
+        if all(int(i) in te_cav_id_set for i in simplex):
+            te_wall_faces_ids.append(tuple(int(i) for i in simplex))
+            te_wall_equations.append(eq)
+    if not te_wall_faces_ids:
+        raise CavityVolumeError("no cavity-adjacent facets on the whole-embryo hull")
+
+    # A patch made purely of TE points is usually a single simple loop, but
+    # can pinch into multiple lobes meeting at one vertex (or come apart
+    # into an outright separate little lobe once that pinch is resolved)
+    # where the true cavity boundary comes close enough that the
+    # whole-embryo hull already threads a facet straight from TE points to
+    # a nearby ICM point, skipping across the gap. When that happens, that
+    # mixed facet is the correct, already-valid connector -- pull in mixed
+    # facets (at most one ICM vertex, so this doesn't eat into the ICM
+    # patch's own territory) touching whatever's currently broken
+    # (a pinch point, or a stray minor loop) rather than broadening the
+    # whole-patch definition, which would swallow the entire TE wall
+    # whenever the ICM cap is nearly flat/convex and the hull's own
+    # decomposition happens to closely match the ICM surface's own.
+    def _boundary_degrees(face_ids):
+        degrees: Dict[int, int] = {}
+        for p, q in _boundary_edges(face_ids):
+            degrees[p] = degrees.get(p, 0) + 1
+            degrees[q] = degrees.get(q, 0) + 1
+        return degrees
+
+    def _connected_components(edges):
+        adjacency: Dict[int, List[int]] = {}
+        for p, q in edges:
+            adjacency.setdefault(p, []).append(q)
+            adjacency.setdefault(q, []).append(p)
+        seen = set()
+        components = []
+        for v in adjacency:
+            if v in seen:
+                continue
+            comp, stack = [], [v]
+            seen.add(v)
+            while stack:
+                cur = stack.pop()
+                comp.append(cur)
+                for n in adjacency[cur]:
+                    if n not in seen:
+                        seen.add(n)
+                        stack.append(n)
+            components.append(comp)
+        return components
+
+    cavity_pts_id_set = te_cav_id_set | icm_cav_id_set
+    already_included = set(te_wall_faces_ids)
+    for _ in range(10):
+        degrees = _boundary_degrees(te_wall_faces_ids)
+        components = _connected_components(_boundary_edges(te_wall_faces_ids))
+        components.sort(key=len, reverse=True)
+        bad_degree = {v for v, d in degrees.items() if d != 2}
+        minor_component_verts = {v for comp in components[1:] for v in comp}
+        broken = bad_degree | minor_component_verts
+        if not broken:
+            break
+
+        added_any = False
+        for simplex, eq in zip(hull_global.simplices, hull_global.equations):
+            verts = tuple(int(i) for i in simplex)
+            if verts in already_included:
+                continue
+            vset = set(verts)
+            if not (vset <= cavity_pts_id_set and len(vset & te_cav_id_set) >= 2):
+                continue
+            if not vset & broken:
+                continue
+            te_wall_faces_ids.append(verts)
+            te_wall_equations.append(eq)
+            already_included.add(verts)
+            added_any = True
+        if not added_any:
+            raise CavityVolumeError("cavity-adjacent TE patch has an unresolved pinch")
+    else:
+        raise CavityVolumeError("cavity-adjacent TE patch pinch resolution did not converge")
+
+    icm_faces_ids = [tuple(surf.icm_cav_ids[i] for i in f) for f in surf.faces]
+
+    icm_boundary = _boundary_edges(icm_faces_ids)
+    te_boundary = _boundary_edges(te_wall_faces_ids)
+    if not icm_boundary or not te_boundary:
+        raise CavityVolumeError("one of the cavity patches has no open boundary")
+
+    icm_rim_ids = sorted({i for e in icm_boundary for i in e})
+    te_rim_ids = sorted({i for e in te_boundary for i in e})
+    if len(icm_rim_ids) < 3 or len(te_rim_ids) < 3:
+        raise CavityVolumeError("not enough rim points to bridge")
+
+    # Bridge the two rims by walking each one as an ordered loop and
+    # stitching them together directly (see _bridge_loops), rather than
+    # spatially Delaunay-triangulating the combined point set and hoping to
+    # filter out the right triangles -- that approach silently produces
+    # gaps whenever the two rims' radii interleave instead of nesting
+    # cleanly, which is common on real (noisy, irregular) cavity boundaries.
+    icm_loop = _order_boundary_loop(icm_boundary)
+    te_loop = _order_boundary_loop(te_boundary)
+
+    all_rim_ids = icm_rim_ids + te_rim_ids
+    rim_pts_3d = s.xyz[all_rim_ids]
+    rim_centered = rim_pts_3d - surf.centroid
+    rim_pts_2d = np.column_stack([rim_centered @ surf.u, rim_centered @ surf.v])
+    pts_2d_lookup = dict(zip(all_rim_ids, rim_pts_2d))
+
+    bridge_faces_ids = _bridge_loops(icm_loop, te_loop, pts_2d_lookup)
+
+    all_faces_ids = icm_faces_ids + te_wall_faces_ids + bridge_faces_ids
+
+    edge_counts: Dict[Tuple[int, int], int] = {}
+    for f in all_faces_ids:
+        for e in _face_edges(f):
+            edge_counts[e] = edge_counts.get(e, 0) + 1
+    if any(c != 2 for c in edge_counts.values()):
+        raise CavityVolumeError("bridged cavity mesh is not watertight")
+
+    # Orient every face outward using a reliable, non-apex-dependent reference
+    # per group, then propagate that orientation to the bridge faces (which
+    # have no such reference of their own) by walking the shared-edge graph:
+    # a properly oriented closed mesh traverses any shared edge in opposite
+    # directions from its two faces. This stays reliable even for very deep
+    # dips, where a single global "apex" point can end up level with (or
+    # past) the dip and make a naive apex-relative orientation ambiguous.
+    oriented_faces = []
+
+    # TE wall facets: scipy's hull.equations already gives a guaranteed
+    # outward unit normal per facet.
+    for simplex, eq in zip(te_wall_faces_ids, te_wall_equations):
+        a, b, c = simplex
+        pa, pb, pc = s.xyz[a], s.xyz[b], s.xyz[c]
+        if np.dot(np.cross(pb - pa, pc - pa), eq[:3]) < 0:
+            b, c = c, b
+        oriented_faces.append((a, b, c))
+
+    # ICM concave cap: a Delaunay triangulation of a height field over a
+    # plane can never fold back on itself, so a single fixed "outward"
+    # direction (away from the TE side) consistently orients every triangle.
+    w = surf.w
+    te_centroid = s.xyz[te_cav_ids].mean(axis=0)
+    if np.dot(w, te_centroid - surf.centroid) > 0:
+        w = -w
+    for f in icm_faces_ids:
+        a, b, c = f
+        pa, pb, pc = s.xyz[a], s.xyz[b], s.xyz[c]
+        if np.dot(np.cross(pb - pa, pc - pa), w) < 0:
+            b, c = c, b
+        oriented_faces.append((a, b, c))
+
+    # Bridge facets: propagate orientation from the now-oriented faces above
+    # via shared-edge matching (BFS), since they touch it directly.
+    directed_known = set()
+    for a, b, c in oriented_faces:
+        directed_known.update({(a, b), (b, c), (c, a)})
+
+    remaining = {i: f for i, f in enumerate(bridge_faces_ids)}
+    edge_to_remaining: Dict[Tuple[int, int], List[int]] = {}
+    for i, f in remaining.items():
+        for e in _face_edges(f):
+            edge_to_remaining.setdefault(e, []).append(i)
+
+    # A candidate face's vertex order (from Delaunay) is arbitrary -- either
+    # of its two possible windings might be the one whose edge matches an
+    # already-oriented neighbour, so both directions of each of its 3
+    # (undirected) edges must be checked, not just the one implied by its
+    # given vertex order.
+    queue = deque()
+    for i, f in list(remaining.items()):
+        found = None
+        for p, q in _face_edges(f):
+            third = [x for x in f if x not in (p, q)][0]
+            if (p, q) in directed_known:
+                found = (q, p, third)
+                break
+            if (q, p) in directed_known:
+                found = (p, q, third)
+                break
+        if found is not None:
+            directed_known.update(
+                {(found[0], found[1]), (found[1], found[2]), (found[2], found[0])}
+            )
+            oriented_faces.append(found)
+            del remaining[i]
+            queue.append(found)
+
+    while queue:
+        a, b, c = queue.popleft()
+        for p, q in ((a, b), (b, c), (c, a)):
+            for i in edge_to_remaining.get((p, q), []) + edge_to_remaining.get((q, p), []):
+                if i not in remaining:
+                    continue
+                f = remaining[i]
+                if q not in f or p not in f:
+                    continue
+                oriented = (q, p, [x for x in f if x not in (p, q)][0])
+                directed_known.update(
+                    {(oriented[0], oriented[1]), (oriented[1], oriented[2]), (oriented[2], oriented[0])}
+                )
+                oriented_faces.append(oriented)
+                del remaining[i]
+                queue.append(oriented)
+
+    if remaining:
+        raise CavityVolumeError("could not consistently orient the bridge mesh")
+
+    apex = s.xyz[sorted({i for f in all_faces_ids for i in f})].mean(axis=0)
+
+    total_volume = 0.0
+    normal_sum = np.zeros(3)
+    area_sum = 0.0
+    mesh_faces = []
+    for a, b, c in oriented_faces:
+        pa, pb, pc = s.xyz[a], s.xyz[b], s.xyz[c]
+        normal = np.cross(pb - pa, pc - pa)
+        total_volume += _signed_tri_volume(apex, pa, pb, pc)
+        normal_sum += normal
+        area_sum += np.linalg.norm(normal)
+        mesh_faces.append(np.array([pa, pb, pc]))
+
+    if area_sum > 0 and np.linalg.norm(normal_sum) > 1e-6 * area_sum:
+        raise CavityVolumeError("bridged cavity mesh orientation is inconsistent")
+    if not np.isfinite(total_volume) or total_volume <= 0:
+        raise CavityVolumeError(f"implausible volume ({total_volume})")
+
+    return float(total_volume), mesh_faces
+
+
+def compute_cavity_volume(session) -> float:
+    """Volume of the shape spanning the ICM cavity surface and the
+    cavity-adjacent TE cells: concave on the ICM side (following the actual
+    point cloud), convex on the TE side. Falls back to a purely convex hull
+    of the combined point set if the hybrid geometry can't be built, in
+    which case session.cavity_volume_used_fallback is set to True and
+    session.cavity_volume_message explains why (also printed to console).
+
+    Also populates session.cavity_mesh_faces with the mesh used, so the
+    cavity-volume visualisation can render the exact same shape; and
+    session.not_cavity_volume / session.not_cavity_mesh_faces with the
+    geometric complement (total embryo hull minus the cavity), so the two
+    volumes always sum back to the whole-embryo convex hull."""
+    s = session
+    s.cavity_volume_used_fallback = False
+    s.cavity_volume_message = ""
+
+    if len(s.outside_bool2) == 0 or len(s.cav_adj_bool) == 0:
+        s.cavity_mesh_faces = []
+        s.not_cavity_volume = 0.0
+        s.not_cavity_mesh_faces = []
+        return 0.0
+
+    try:
+        volume, mesh_faces = _compute_cavity_volume_hybrid(s)
+    except Exception as exc:
+        msg = f"Hybrid cavity volume unavailable ({exc}); using convex-hull fallback."
+        print(f"[cavity volume] {msg}")
+        s.cavity_volume_used_fallback = True
+        s.cavity_volume_message = msg
+        volume, mesh_faces = _compute_cavity_volume_convex(s)
+
+    s.cavity_mesh_faces = mesh_faces
+
+    s.not_cavity_volume = 0.0
+    s.not_cavity_mesh_faces = []
+    if len(s.xyz) >= 4:
+        try:
+            total_hull = ConvexHull(s.xyz)
+            outer_faces = [s.xyz[simplex] for simplex in total_hull.simplices]
+            s.not_cavity_volume = max(float(total_hull.volume) - volume, 0.0)
+            s.not_cavity_mesh_faces = outer_faces + mesh_faces
+        except Exception:
+            pass
+
+    return volume
 
 
 def tangent_frame(w):
@@ -1569,10 +2248,27 @@ class EmbryoCanvas(FigureCanvasQTAgg):
         self._vol_artists[cat] = []
         if not self._vol_visible.get(cat) or self.ax is None:
             return
+        ecol, fcol, alpha, lw = self._VOL_STYLE[cat]
+
+        precomputed_faces = {
+            "cavity": self.session.cavity_mesh_faces,
+            "not_cavity": self.session.not_cavity_mesh_faces,
+        }.get(cat)
+        if precomputed_faces:
+            mesh = Poly3DCollection(
+                precomputed_faces,
+                alpha=alpha,
+                facecolor=fcol,
+                edgecolor=ecol,
+                linewidth=lw,
+            )
+            self.ax.add_collection3d(mesh)
+            self._vol_artists[cat].append(mesh)
+            return
+
         pts = self._points_for_category(cat)
         if pts is None:
             return
-        ecol, fcol, alpha, lw = self._VOL_STYLE[cat]
         try:
             tri = Delaunay(pts)
         except Exception:
@@ -2686,56 +3382,22 @@ class IvenMainWindow(QMainWindow):
         )
 
     def _make_icm_surface(self):
-        """Build a triangulated surface along cavity-adjacent ICM points.
-
-        Steps:
-        1. Gather ICM points that are cavity-adjacent.
-        2. PCA → smallest component gives the plane normal.
-        3. Project those 3-D points onto the plane (2-D).
-        4. 2-D Delaunay triangulation.
-        5. Use the same triangle indices on the original 3-D points.
-        """
+        """Build a triangulated surface along cavity-adjacent ICM points, and
+        recompute the cavity volume (and its visualisation mesh) to match."""
         s = self.session
         if s is None or s.num_cells == 0:
             return
-        if len(s.outside_bool2) == 0 or len(s.cav_adj_bool) == 0:
+
+        surf = build_icm_cavity_faces(s)
+        if surf is None:
+            s.icm_outlier_faces = []
             return
 
-        # ICM points that are cavity-adjacent (inside AND cavity-adj)
-        icm_cav_mask = (s.outside_bool2 == 0) & (s.cav_adj_bool == 1)
-        icm_cav_indices = np.where(icm_cav_mask)[0]
-        icm_cav_indices = [
-            idx for idx in icm_cav_indices if idx not in s.icm_outlier_ids
-        ]
+        s.icm_outlier_faces = [surf.pts_3d[face] for face in surf.faces]
 
-        if len(icm_cav_indices) < 3:
-            return
-
-        pts_3d = s.xyz[icm_cav_indices]
-        centroid = pts_3d.mean(axis=0)
-        centered = pts_3d - centroid
-
-        # PCA via covariance eigen-decomposition
-        cov = np.cov(centered, rowvar=False)
-        eigvals, eigvecs = np.linalg.eigh(cov)
-        # Smallest eigenvalue index → thinnest direction (plane normal)
-        order = np.argsort(eigvals)[::-1]  # descending
-        # Two largest components span the plane
-        u = eigvecs[:, order[0]]
-        v = eigvecs[:, order[1]]
-
-        # Project onto the plane (2-D coordinates)
-        pts_2d = np.column_stack([centered @ u, centered @ v])
-
-        # 2-D Delaunay triangulation
-        try:
-            tri = Delaunay(pts_2d)
-        except Exception:
-            return
-
-        # Build 3-D Poly3DCollection using original (un-projected) points
-        polys = [pts_3d[face] for face in tri.simplices]
-        s.icm_outlier_faces = polys
+        s.cavity_volume = compute_cavity_volume(s)
+        if s.cavity_volume_used_fallback:
+            self.show_message(s.cavity_volume_message)
 
     def _auto_detect_outlier(self):
         s = self.session
@@ -2841,7 +3503,7 @@ class IvenMainWindow(QMainWindow):
                 self.session.migration_k = 5
 
             try:
-                self.session.gap_multiplier = float(vals["gap_multiplier"])
+                self.session.gap_multiplier = float(vals["migration_gap_multiplier"])
             except ValueError:
                 self.session.gap_multiplier = 2.0
 
@@ -3265,10 +3927,24 @@ class IvenMainWindow(QMainWindow):
         s.mean_te_distance = float(np.mean(te_nbr_distances))
         s.mean_cav_icm_distance_norm = s.mean_cav_icm_distance / s.mean_te_distance
 
+        s.cavity_volume = compute_cavity_volume(s)
+        if s.cavity_volume_used_fallback:
+            QMessageBox.warning(self, "Cavity Volume", s.cavity_volume_message)
+
+        spacing_result = compute_migration_spacing_multi_k(
+            s.xyz, s.inside_ids2, s.gap_multiplier
+        )
+        if spacing_result is not None:
+            s.migration_spacing, s.migration_spacing_summary = spacing_result
+        else:
+            s.migration_spacing = pd.DataFrame()
+            s.migration_spacing_summary = pd.DataFrame()
+
         hull = ConvexHull(s.xyz)
         s.info = pd.DataFrame(
             {
                 "Volume": [hull.volume],
+                "Cavity Volume": [s.cavity_volume],
                 "Mean Distance Cavity-adjacent ICM": s.mean_cav_icm_distance,
                 "Mean Distance Cavity-adjacent ICM (norm)": s.mean_cav_icm_distance_norm,
                 "Mean Distance TE": s.mean_te_distance,
