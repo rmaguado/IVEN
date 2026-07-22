@@ -528,7 +528,7 @@ class Session:
     # Migration detection params
     migration_k: int = 5
     gap_multiplier: float = 1.5
-    migration_percentile: float = 75.0
+    migration_percentile: float = 50.0
     migration_spacing: pd.DataFrame = field(default_factory=pd.DataFrame)
     migration_spacing_summary: pd.DataFrame = field(default_factory=pd.DataFrame)
     migration_spacing_pct: pd.DataFrame = field(default_factory=pd.DataFrame)
@@ -683,7 +683,7 @@ def compute_migration_spacing(
     inside_ids: np.ndarray,
     gap_multiplier: float,
     k: int = 5,
-    percentile: float = 75,
+    percentile: float = 50,
 ):
     """Per-ICM-cell local spacing (mean distance to k nearest ICM neighbours),
     plus the typical hull spacing and the resulting migration threshold."""
@@ -730,7 +730,7 @@ def compute_migration_spacing_multi_k(
     inside_ids: np.ndarray,
     gap_multiplier: float,
     ks=(3, 5, 7, 9, 11),
-    percentile: float = 75,
+    percentile: float = 50,
 ):
     """Per-ICM-cell local spacing computed at several neighbourhood sizes (k),
     plus the typical hull spacing and migration threshold at each k."""
@@ -824,7 +824,7 @@ def detect_migrating(
     inside_ids: np.ndarray,
     gap_multiplier: float,
     k: int = 5,
-    percentile: float = 75,
+    percentile: float = 50,
 ) -> List[int]:
     result = compute_migration_spacing(
         data_xyz, inside_ids, gap_multiplier, k, percentile
@@ -2522,7 +2522,7 @@ class CavitySettingsDialog(QDialog):
         use_pe_centroid,
         current_k=5,
         current_gap_multiplier=3.5,
-        current_percentile=75.0,
+        current_percentile=50.0,
         parent=None,
     ):
         super().__init__(parent)
@@ -3514,7 +3514,7 @@ class IvenMainWindow(QMainWindow):
             try:
                 self.session.migration_percentile = float(vals["migration_percentile"])
             except ValueError:
-                self.session.migration_percentile = 75.0
+                self.session.migration_percentile = 50.0
 
     def _auto_detect_neighbours(self):
         s = self.session
