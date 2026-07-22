@@ -531,6 +531,8 @@ class Session:
     migration_percentile: float = 75.0
     migration_spacing: pd.DataFrame = field(default_factory=pd.DataFrame)
     migration_spacing_summary: pd.DataFrame = field(default_factory=pd.DataFrame)
+    migration_spacing_pct: pd.DataFrame = field(default_factory=pd.DataFrame)
+    migration_spacing_pct_summary: pd.DataFrame = field(default_factory=pd.DataFrame)
 
     cavity_volume: float = 0.0
     cavity_mesh_faces: list = field(default_factory=list)
@@ -643,15 +645,27 @@ class Session:
                 self.migration.to_excel(writer, sheet_name="Migration", index=False)
 
             if hasattr(self, "migration_spacing") and not self.migration_spacing.empty:
+                row = 0
                 self.migration_spacing_summary.to_excel(
-                    writer, sheet_name="Spacing", index=False
+                    writer, sheet_name="Spacing", index=False, startrow=row
                 )
+                row += len(self.migration_spacing_summary) + 3
                 self.migration_spacing.to_excel(
-                    writer,
-                    sheet_name="Spacing",
-                    index=False,
-                    startrow=len(self.migration_spacing_summary) + 3,
+                    writer, sheet_name="Spacing", index=False, startrow=row
                 )
+                row += len(self.migration_spacing) + 3
+
+                if (
+                    hasattr(self, "migration_spacing_pct")
+                    and not self.migration_spacing_pct.empty
+                ):
+                    self.migration_spacing_pct_summary.to_excel(
+                        writer, sheet_name="Spacing", index=False, startrow=row
+                    )
+                    row += len(self.migration_spacing_pct_summary) + 3
+                    self.migration_spacing_pct.to_excel(
+                        writer, sheet_name="Spacing", index=False, startrow=row
+                    )
 
             self.info.to_excel(writer, sheet_name="Info", index=False)
 
@@ -733,14 +747,12 @@ def compute_migration_spacing_multi_k(
     except Exception:
         return None
 
-    hull_mask = np.zeros(n, dtype=bool)
-    hull_mask[hull_local_idx] = True
-
     D = cdist(icm, icm)
     np.fill_diagonal(D, np.inf)
     D.sort(axis=1)
 
-    spacing_df = pd.DataFrame({"ID": inside_ids, "is_hull_cell": hull_mask})
+    hull_ids = inside_ids[hull_local_idx]
+    spacing_df = pd.DataFrame({"ID": hull_ids})
     summary = {"k": [], "typical_spacing": [], "threshold_spacing": []}
 
     for k in ks:
@@ -750,9 +762,56 @@ def compute_migration_spacing_multi_k(
         d_typical = np.percentile(hull_local, percentile)
         threshold_distance = gap_multiplier * d_typical
 
-        spacing_df[f"local_spacing_k{k}"] = local
+        spacing_df[f"local_spacing_k{k}"] = hull_local
 
         summary["k"].append(k)
+        summary["typical_spacing"].append(d_typical)
+        summary["threshold_spacing"].append(threshold_distance)
+
+    summary_df = pd.DataFrame(summary)
+    return spacing_df, summary_df
+
+
+def compute_migration_spacing_multi_percentile(
+    data_xyz: np.ndarray,
+    inside_ids: np.ndarray,
+    gap_multiplier: float,
+    k: int = 5,
+    percentiles=(50, 60, 70, 75, 80, 90, 95),
+):
+    """Per-ICM-cell local spacing at a fixed k, plus the typical hull spacing
+    and migration threshold swept across several percentile cutoffs."""
+    inside_ids = np.asarray(inside_ids, dtype=int)
+    n = len(inside_ids)
+    if n < 6:
+        return None
+
+    icm = data_xyz[inside_ids]
+
+    try:
+        hull = ConvexHull(icm)
+        hull_local_idx = np.unique(hull.vertices)
+    except Exception:
+        return None
+
+    D = cdist(icm, icm)
+    np.fill_diagonal(D, np.inf)
+    kk = min(k, n - 1)
+    D.sort(axis=1)
+    local = D[:, :kk].mean(axis=1)
+    hull_local = local[hull_local_idx]
+    hull_ids = inside_ids[hull_local_idx]
+
+    spacing_df = pd.DataFrame({"ID": hull_ids, "local_spacing": hull_local})
+    summary = {"percentile": [], "typical_spacing": [], "threshold_spacing": []}
+
+    for pct in percentiles:
+        d_typical = np.percentile(hull_local, pct)
+        threshold_distance = gap_multiplier * d_typical
+
+        spacing_df[f"is_migrating_p{pct}"] = hull_local > threshold_distance
+
+        summary["percentile"].append(pct)
         summary["typical_spacing"].append(d_typical)
         summary["threshold_spacing"].append(threshold_distance)
 
@@ -3879,6 +3938,15 @@ class IvenMainWindow(QMainWindow):
         else:
             s.migration_spacing = pd.DataFrame()
             s.migration_spacing_summary = pd.DataFrame()
+
+        spacing_pct_result = compute_migration_spacing_multi_percentile(
+            s.xyz, s.inside_ids2, s.gap_multiplier, k=s.migration_k
+        )
+        if spacing_pct_result is not None:
+            s.migration_spacing_pct, s.migration_spacing_pct_summary = spacing_pct_result
+        else:
+            s.migration_spacing_pct = pd.DataFrame()
+            s.migration_spacing_pct_summary = pd.DataFrame()
 
         hull = ConvexHull(s.xyz)
         s.info = pd.DataFrame(
