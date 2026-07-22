@@ -528,6 +528,7 @@ class Session:
     # Migration detection params
     migration_k: int = 5
     gap_multiplier: float = 1.5
+    migration_percentile: float = 75.0
     migration_spacing: pd.DataFrame = field(default_factory=pd.DataFrame)
     migration_spacing_summary: pd.DataFrame = field(default_factory=pd.DataFrame)
 
@@ -668,6 +669,7 @@ def compute_migration_spacing(
     inside_ids: np.ndarray,
     gap_multiplier: float,
     k: int = 5,
+    percentile: float = 75,
 ):
     """Per-ICM-cell local spacing (mean distance to k nearest ICM neighbours),
     plus the typical hull spacing and the resulting migration threshold."""
@@ -694,7 +696,7 @@ def compute_migration_spacing(
     hull_mask[hull_local_idx] = True
 
     hull_local = local[hull_local_idx]
-    d_typical = np.percentile(hull_local, 75)
+    d_typical = np.percentile(hull_local, percentile)
 
     threshold_distance = gap_multiplier * d_typical
 
@@ -714,6 +716,7 @@ def compute_migration_spacing_multi_k(
     inside_ids: np.ndarray,
     gap_multiplier: float,
     ks=(3, 5, 7, 9, 11),
+    percentile: float = 75,
 ):
     """Per-ICM-cell local spacing computed at several neighbourhood sizes (k),
     plus the typical hull spacing and migration threshold at each k."""
@@ -744,7 +747,7 @@ def compute_migration_spacing_multi_k(
         kk = min(k, n - 1)
         local = D[:, :kk].mean(axis=1)
         hull_local = local[hull_local_idx]
-        d_typical = np.percentile(hull_local, 75)
+        d_typical = np.percentile(hull_local, percentile)
         threshold_distance = gap_multiplier * d_typical
 
         spacing_df[f"local_spacing_k{k}"] = local
@@ -762,8 +765,9 @@ def detect_migrating(
     inside_ids: np.ndarray,
     gap_multiplier: float,
     k: int = 5,
+    percentile: float = 75,
 ) -> List[int]:
-    result = compute_migration_spacing(data_xyz, inside_ids, gap_multiplier, k)
+    result = compute_migration_spacing(data_xyz, inside_ids, gap_multiplier, k, percentile)
     if result is None:
         return []
     spacing_df, _, _ = result
@@ -2457,6 +2461,7 @@ class CavitySettingsDialog(QDialog):
         use_pe_centroid,
         current_k=5,
         current_gap_multiplier=3.5,
+        current_percentile=75.0,
         parent=None,
     ):
         super().__init__(parent)
@@ -2491,6 +2496,17 @@ class CavitySettingsDialog(QDialog):
         mult_row.addStretch()
         mult_row.addWidget(self.mult_edit)
         layout.addLayout(mult_row)
+
+        pct_row = QHBoxLayout()
+        pct_row.setSpacing(8)
+        pct_lbl = QLabel("Hull spacing percentile")
+        pct_lbl.setStyleSheet("font-size: 11px; color: #555;")
+        self.pct_edit = QLineEdit(str(current_percentile))
+        self.pct_edit.setFixedWidth(80)
+        pct_row.addWidget(pct_lbl)
+        pct_row.addStretch()
+        pct_row.addWidget(self.pct_edit)
+        layout.addLayout(pct_row)
 
         layout.addSpacing(12)
 
@@ -2535,6 +2551,7 @@ class CavitySettingsDialog(QDialog):
             "use_pe_centroid": self.checkbox.isChecked(),
             "migration_k": self.k_edit.text(),
             "migration_gap_multiplier": self.mult_edit.text(),
+            "migration_percentile": self.pct_edit.text(),
         }
 
 
@@ -3296,8 +3313,9 @@ class IvenMainWindow(QMainWindow):
         )
 
     def _make_icm_surface(self):
-        """Build a triangulated surface along cavity-adjacent ICM points, and
-        recompute the cavity volume (and its visualisation mesh) to match."""
+        """Build a triangulated surface along cavity-adjacent ICM points,
+        recompute the cavity volume (and its visualisation mesh) to match,
+        and refresh migration distances against the new surface."""
         s = self.session
         if s is None or s.num_cells == 0:
             return
@@ -3305,13 +3323,21 @@ class IvenMainWindow(QMainWindow):
         surf = build_icm_cavity_faces(s)
         if surf is None:
             s.icm_outlier_faces = []
-            return
+        else:
+            s.icm_outlier_faces = [surf.pts_3d[face] for face in surf.faces]
 
-        s.icm_outlier_faces = [surf.pts_3d[face] for face in surf.faces]
+            s.cavity_volume = compute_cavity_volume(s)
+            if s.cavity_volume_used_fallback:
+                self.show_message(s.cavity_volume_message)
 
-        s.cavity_volume = compute_cavity_volume(s)
-        if s.cavity_volume_used_fallback:
-            self.show_message(s.cavity_volume_message)
+        # Cavity-adjacent cells changed, so the ICM surface moved — re-derive
+        # distances for the already-classified migrating cells (not which
+        # cells count as migrating) and redraw the lines if visible.
+        if len(s.icm_outlier_ids) > 0 and len(s.icm_outlier_faces) > 0:
+            s = compile_migration(s)
+            self.session = s
+            if self.btn_migration_lines.isChecked():
+                self.canvas.draw_migration_lines()
 
     def _auto_detect_outlier(self):
         s = self.session
@@ -3321,7 +3347,11 @@ class IvenMainWindow(QMainWindow):
             )
             return
         migrating = detect_migrating(
-            s.xyz, s.inside_ids2, gap_multiplier=s.gap_multiplier, k=s.migration_k
+            s.xyz,
+            s.inside_ids2,
+            gap_multiplier=s.gap_multiplier,
+            k=s.migration_k,
+            percentile=s.migration_percentile,
         )
         s.icm_outlier_ids = migrating
         s.icm_outlier_bool = np.zeros(s.num_cells, dtype=np.int64)
@@ -3354,18 +3384,10 @@ class IvenMainWindow(QMainWindow):
         s.cavity_loaded = True
 
         self._make_icm_surface()
-
-        # Pre-compute migration distances so migration lines are available
-        if len(s.icm_outlier_ids) > 0 and len(s.icm_outlier_faces) > 0:
-            s = compile_migration(s)
-            self.session = s
+        self.btn_icm_surface.setChecked(True)
 
         self._apply_colour_mode()
         self.canvas.refresh_overlays()
-
-        # Refresh migration lines if they are currently visible
-        if self.btn_migration_lines.isChecked():
-            self.canvas.draw_migration_lines()
 
         self.show_message(f"Cavity-adjacent: {len(cavity_ids)} cells ")
         self._update_cell_counts()
@@ -3398,6 +3420,7 @@ class IvenMainWindow(QMainWindow):
             use_pe_centroid=self.session.use_pe_centroid,
             current_k=self.session.migration_k,
             current_gap_multiplier=self.session.gap_multiplier,
+            current_percentile=self.session.migration_percentile,
             parent=self,
         )
         if dlg.exec():
@@ -3420,6 +3443,13 @@ class IvenMainWindow(QMainWindow):
                 self.session.gap_multiplier = float(vals["migration_gap_multiplier"])
             except ValueError:
                 self.session.gap_multiplier = 2.0
+
+            try:
+                self.session.migration_percentile = float(
+                    vals["migration_percentile"]
+                )
+            except ValueError:
+                self.session.migration_percentile = 75.0
 
     def _auto_detect_neighbours(self):
         s = self.session
@@ -3491,12 +3521,8 @@ class IvenMainWindow(QMainWindow):
     def _toggle_migration_lines(self, checked):
         s = self.session
         if checked:
-            if len(s.icm_outlier_ids) == 0 or len(s.icm_outlier_faces) == 0:
-                self.show_message("Run cavity detection first.")
-                self.btn_migration_lines.setChecked(False)
-                return
             # Compute migration distances (and line endpoints) if not yet done
-            if not hasattr(s, "migration_lines") or len(s.migration_lines) == 0:
+            if len(s.icm_outlier_ids) > 0 and len(s.migration_lines) == 0:
                 s = compile_migration(s)
                 self.session = s
             self.canvas.draw_migration_lines()
@@ -3846,7 +3872,7 @@ class IvenMainWindow(QMainWindow):
             QMessageBox.warning(self, "Cavity Volume", s.cavity_volume_message)
 
         spacing_result = compute_migration_spacing_multi_k(
-            s.xyz, s.inside_ids2, s.gap_multiplier
+            s.xyz, s.inside_ids2, s.gap_multiplier, percentile=s.migration_percentile
         )
         if spacing_result is not None:
             s.migration_spacing, s.migration_spacing_summary = spacing_result
