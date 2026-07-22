@@ -826,7 +826,9 @@ def detect_migrating(
     k: int = 5,
     percentile: float = 75,
 ) -> List[int]:
-    result = compute_migration_spacing(data_xyz, inside_ids, gap_multiplier, k, percentile)
+    result = compute_migration_spacing(
+        data_xyz, inside_ids, gap_multiplier, k, percentile
+    )
     if result is None:
         return []
     spacing_df, _, _ = result
@@ -3332,7 +3334,16 @@ class IvenMainWindow(QMainWindow):
         self.chk_vol_cavity.setChecked(False)
         self.chk_vol_not_cavity.setChecked(False)
 
-        self.canvas.load_session(self.session)
+        try:
+            self.canvas.load_session(self.session)
+        except Exception as e:
+            ErrorDialog.show_exception(
+                self,
+                "Load Error",
+                f"Failed to load '{Path(path).name}':\n{e}",
+                e,
+            )
+            return
 
         if self.session.is_checkpoint:
             self.show_message("Checkpoint restored. Previous classifications loaded.")
@@ -3389,9 +3400,6 @@ class IvenMainWindow(QMainWindow):
             if s.cavity_volume_used_fallback:
                 self.show_message(s.cavity_volume_message)
 
-        # Cavity-adjacent cells changed, so the ICM surface moved — re-derive
-        # distances for the already-classified migrating cells (not which
-        # cells count as migrating) and redraw the lines if visible.
         if len(s.icm_outlier_ids) > 0 and len(s.icm_outlier_faces) > 0:
             s = compile_migration(s)
             self.session = s
@@ -3504,9 +3512,7 @@ class IvenMainWindow(QMainWindow):
                 self.session.gap_multiplier = 2.0
 
             try:
-                self.session.migration_percentile = float(
-                    vals["migration_percentile"]
-                )
+                self.session.migration_percentile = float(vals["migration_percentile"])
             except ValueError:
                 self.session.migration_percentile = 75.0
 
@@ -3943,7 +3949,9 @@ class IvenMainWindow(QMainWindow):
             s.xyz, s.inside_ids2, s.gap_multiplier, k=s.migration_k
         )
         if spacing_pct_result is not None:
-            s.migration_spacing_pct, s.migration_spacing_pct_summary = spacing_pct_result
+            s.migration_spacing_pct, s.migration_spacing_pct_summary = (
+                spacing_pct_result
+            )
         else:
             s.migration_spacing_pct = pd.DataFrame()
             s.migration_spacing_pct_summary = pd.DataFrame()
