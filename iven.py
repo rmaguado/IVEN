@@ -3425,6 +3425,13 @@ class IvenMainWindow(QMainWindow):
         if len(s.icm_outlier_ids) > 0:
             s.icm_outlier_bool[s.icm_outlier_ids] = 1
 
+        self._make_icm_surface()
+        self._apply_colour_mode()
+        self.canvas.refresh_overlays()
+
+        self.show_message(f"Migrating cells: {len(s.icm_outlier_ids)}")
+        self._update_cell_counts()
+
     def _auto_detect_cavity(self):
         s = self.session
         if len(s.inside_ids2) < 4:
@@ -3586,8 +3593,8 @@ class IvenMainWindow(QMainWindow):
     def _toggle_migration_lines(self, checked):
         s = self.session
         if checked:
-            # Compute migration distances (and line endpoints) if not yet done
-            if len(s.icm_outlier_ids) > 0 and len(s.migration_lines) == 0:
+            # Always recompute so lines reflect the latest outlier / surface state
+            if len(s.icm_outlier_ids) > 0 and len(s.icm_outlier_faces) > 0:
                 s = compile_migration(s)
                 self.session = s
             self.canvas.draw_migration_lines()
@@ -3653,6 +3660,10 @@ class IvenMainWindow(QMainWindow):
             s.icm_outlier_bool = np.zeros(s.num_cells, dtype=np.int64)
             if len(s.icm_outlier_ids) > 0:
                 s.icm_outlier_bool[s.icm_outlier_ids] = 1
+
+            if len(s.icm_outlier_faces) > 0:
+                s = compile_migration(s)
+                self.session = s
 
             self._apply_colour_mode()
             self.canvas.refresh_overlays()
